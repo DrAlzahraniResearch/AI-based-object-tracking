@@ -122,4 +122,51 @@ theorem no_los_of_spec {a b : RBox} {h v : ℝ} (hh : 0 ≤ h) (hv : 0 ≤ v) (h
   rintro ⟨h1, h2⟩
   rcases sep_hv_of_spec hh hv hs hp hq with h3 | h3 <;> linarith
 
+/-! ## Theorem 3: deviation bounds (sim-to-real)
+
+The volumes above are a plan. A real autopilot tracks its plan with some error. If every
+aircraft stays within `eh` horizontally (per axis), `ev` vertically and `δ` in time of some
+point of its own nominal volume, it is inside that volume widened by `(eh, ev, δ)`, so
+cylinder separation of the widened volumes rules out loss of separation. Equivalently,
+the nominal volumes need gaps enlarged by twice the error (`sepHV_inflate_iff`). The error
+bound is what the fidelity report measures (Tier A vs PX4).
+-/
+
+/-- Volume widened by `eh` along x and y, `ev` along z and `δ` in time, on every side. -/
+def RBox.inflate (b : RBox) (eh ev δ : ℝ) : RBox :=
+  ⟨b.x0 - eh, b.x1 + eh, b.y0 - eh, b.y1 + eh, b.z0 - ev, b.z1 + ev, b.t0 - δ, b.t1 + δ⟩
+
+/-- The actual sample `(p, t)` is within the error bound of the nominal sample `(p0, t0)`. -/
+def Tracks (p : P3) (t : ℝ) (p0 : P3) (t0 : ℝ) (eh ev δ : ℝ) : Prop :=
+  |p.x - p0.x| ≤ eh ∧ |p.y - p0.y| ≤ eh ∧ |p.z - p0.z| ≤ ev ∧ |t - t0| ≤ δ
+
+/-- Tracking a point of `b` within the bound puts the actual sample in the widened volume. -/
+theorem mem_inflate_of_tracks {b : RBox} {p p0 : P3} {t t0 eh ev δ : ℝ}
+    (h0 : b.mem p0 t0) (ht : Tracks p t p0 t0 eh ev δ) : (b.inflate eh ev δ).mem p t := by
+  obtain ⟨hx0, hx1, hy0, hy1, hz0, hz1, ht0, ht1⟩ := h0
+  obtain ⟨ex, ey, ez, et⟩ := ht
+  rw [abs_le] at ex ey ez et
+  simp only [RBox.mem, RBox.inflate]
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;> linarith [ex.1, ex.2, ey.1, ey.2, ez.1, ez.2, et.1, et.2]
+
+/-- Widened volumes are cylinder-separated iff the nominal ones have gaps enlarged by twice the
+error: `h + 2 eh` horizontally, `v + 2 ev` vertically, or more than `2 δ` in time. -/
+theorem sepHV_inflate_iff (a b : RBox) (h v eh ev δ : ℝ) :
+    SepHV (a.inflate eh ev δ) (b.inflate eh ev δ) h v ↔
+      (a.t1 + 2 * δ < b.t0 ∨ b.t1 + 2 * δ < a.t0 ∨
+       a.x1 + (h + 2 * eh) ≤ b.x0 ∨ b.x1 + (h + 2 * eh) ≤ a.x0 ∨
+       a.y1 + (h + 2 * eh) ≤ b.y0 ∨ b.y1 + (h + 2 * eh) ≤ a.y0 ∨
+       a.z1 + (v + 2 * ev) ≤ b.z0 ∨ b.z1 + (v + 2 * ev) ≤ a.z0) := by
+  simp only [SepHV, RBox.inflate]
+  refine or_congr ?_ (or_congr ?_ (or_congr ?_ (or_congr ?_ (or_congr ?_ (or_congr ?_
+    (or_congr ?_ ?_)))))) <;> constructor <;> intro hx <;> linarith
+
+/-- **Theorem 3.** If the widened volumes are cylinder-separated and each aircraft tracks a point
+of its own nominal volume within `(eh, ev, δ)`, the aircraft are not in loss of separation. -/
+theorem no_los_of_deviation {a b : RBox} {h v eh ev δ : ℝ} (hh : 0 ≤ h) (hv : 0 ≤ v)
+    (hs : SepHV (a.inflate eh ev δ) (b.inflate eh ev δ) h v)
+    {p q p0 q0 : P3} {t t0 s0 : ℝ} (hp0 : a.mem p0 t0) (hq0 : b.mem q0 s0)
+    (hp : Tracks p t p0 t0 eh ev δ) (hq : Tracks q t q0 s0 eh ev δ) : ¬ LoS p q h v :=
+  no_los_of_spec hh hv hs (mem_inflate_of_tracks hp0 hp) (mem_inflate_of_tracks hq0 hq)
+
 end Utm

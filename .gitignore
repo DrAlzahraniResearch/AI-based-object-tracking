@@ -11,6 +11,8 @@ rosbags/
 *.engine
 weights/
 runs/
+runs_twin/
+*.rrd
 detection_cache/
 outputs/
 *.mp4

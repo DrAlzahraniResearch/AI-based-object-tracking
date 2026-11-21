@@ -28,4 +28,5 @@ WORKDIR /work
 ENV PYTHONPATH=/work
 CMD ["bash", "-c", "cd proofs && lake exe cache get && lake build && lake env lean UtmProofs/Axioms.lean && cd .. \
      && make -C runtime test \
-     && pytest -q tests/test_checker_ffi.py tests/test_scheduler.py::test_verified_search_matches_reference"]
+     && pytest -q tests/test_checker_ffi.py tests/test_scheduler.py::test_verified_search_matches_reference \
+        tests/test_twin.py::test_verified_audit_of_twin_run"]

@@ -12,7 +12,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from runtime.utm_checker import CheckerUnavailable, VerifiedChecker  # noqa: E402
-from swarm_sim.intents import inside_ref, separated_hv_matrix, separated_hv_ref, separated_ref  # noqa: E402
+from swarm_sim.intents import (inside_ref, separated_dev_ref, separated_hv_matrix, separated_hv_ref,  # noqa: E402
+                               separated_ref)  # noqa: E402
 
 try:
     CHK = VerifiedChecker()
@@ -142,3 +143,43 @@ def test_count_conflicts_hv_matches_pairwise():
     expected = sum(1 for i in range(len(boxes)) for j in range(i + 1, len(boxes))
                    if groups[i] != groups[j] and not separated_hv_ref(boxes[i], boxes[j], 300, 100))
     assert CHK.count_conflicts_hv(boxes, groups, 300, 100) == expected
+
+
+def test_dev_known_cases_and_reference():
+    a, beside = (0, 10, 0, 10, 0, 10, 0, 10), (15, 20, 0, 10, 0, 10, 0, 10)        # x gap 5
+    later = (0, 10, 0, 10, 0, 10, 11, 20)                                            # time gap 1
+    assert CHK.separated_dev(a, beside, 1, 100, 2, 0, 0) and not CHK.separated_dev(a, beside, 1, 100, 3, 0, 0)
+    assert CHK.separated_dev(a, later, 5, 5, 0, 0, 0) and not CHK.separated_dev(a, later, 5, 5, 0, 0, 1)
+    rng = np.random.default_rng(13)
+    for _ in range(3_000):
+        x, y = _rand_box(rng), _rand_box(rng)
+        h, v, eh, ev, dt = (int(rng.integers(0, 2_000)) for _ in range(5))
+        assert CHK.separated_dev(x, y, h, v, eh, ev, dt) == separated_dev_ref(x, y, h, v, eh, ev, dt)
+    A = [_rand_box(rng) for _ in range(40)]
+    B = [_rand_box(rng) for _ in range(60)]
+    assert CHK.count_against_dev(A, B, 300, 100, 50, 20, 10) == sum(
+        not separated_dev_ref(p, q, 300, 100, 50, 20, 10) for p in A for q in B)
+
+
+def test_dev_soundness_tracking_error():
+    """Theorem 3 as a property: nominal points in accepted boxes, actual points within the error bound
+    (and timing error within dt), never in loss of separation."""
+    rng = np.random.default_rng(17)
+    accepted = 0
+    for _ in range(5_000):
+        a, b = _rand_box(rng, 3_000, 1_500), _rand_box(rng, 3_000, 1_500)
+        h, v, eh, ev, dt = (int(rng.integers(0, 600)) for _ in range(5))
+        if not CHK.separated_dev(a, b, h, v, eh, ev, dt):
+            continue
+        accepted += 1
+        for _ in range(10):
+            t = rng.uniform(min(a[6], b[6]) - dt, max(a[7], b[7]) + dt)
+            ta, tb = t + rng.uniform(-dt, dt), t + rng.uniform(-dt, dt)        # nominal times within dt
+            if not (a[6] <= ta <= a[7] and b[6] <= tb <= b[7]):
+                continue
+            p0 = [rng.uniform(a[2 * k], a[2 * k + 1]) for k in range(3)]
+            q0 = [rng.uniform(b[2 * k], b[2 * k + 1]) for k in range(3)]
+            p = [p0[0] + rng.uniform(-eh, eh), p0[1] + rng.uniform(-eh, eh), p0[2] + rng.uniform(-ev, ev)]
+            q = [q0[0] + rng.uniform(-eh, eh), q0[1] + rng.uniform(-eh, eh), q0[2] + rng.uniform(-ev, ev)]
+            assert math.hypot(p[0] - q[0], p[1] - q[1]) >= h - 1e-6 or abs(p[2] - q[2]) >= v - 1e-6
+    assert accepted > 50

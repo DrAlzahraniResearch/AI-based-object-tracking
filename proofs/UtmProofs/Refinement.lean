@@ -110,4 +110,23 @@ theorem checker_no_los_samples {a b : Box} {h v m : Int} (hh : 0 ≤ h) (hv : 0 
     ¬ LoS ⟨px, py, pz⟩ ⟨qx, qy, qz⟩ (h : ℝ) (v : ℝ) :=
   checker_no_los hh hv hs (inside_sound hm hp) (inside_sound hm hq)
 
+/-- Integer widening commutes with the cast to ℝ. -/
+theorem Box.inflate_toR (b : Box) (eh ev dt : Int) :
+    (b.inflate eh ev dt).toR = b.toR.inflate (eh : ℝ) (ev : ℝ) (dt : ℝ) := by
+  simp only [Box.inflate, Box.toR, RBox.inflate, Int.cast_sub, Int.cast_add]
+
+theorem separatedDev_sound {a b : Box} {h v eh ev dt : Int} (hs : separatedDev a b h v eh ev dt = true) :
+    SepHV (a.toR.inflate eh ev dt) (b.toR.inflate eh ev dt) (h : ℝ) (v : ℝ) := by
+  have := separatedHV_sound hs
+  rwa [Box.inflate_toR, Box.inflate_toR] at this
+
+/-- **Checker-level Theorem 3.** If the deployed checker accepts the two nominal volumes with
+thresholds `h, v ≥ 0` and error bound `(eh, ev, dt)`, and each aircraft tracks a point of its own
+nominal volume within that bound, they are not in loss of separation. -/
+theorem checker_no_los_dev {a b : Box} {h v eh ev dt : Int} (hh : 0 ≤ h) (hv : 0 ≤ v)
+    (hs : separatedDev a b h v eh ev dt = true) {p q p0 q0 : P3} {t t0 s0 : ℝ}
+    (hp0 : a.toR.mem p0 t0) (hq0 : b.toR.mem q0 s0)
+    (hp : Tracks p t p0 t0 eh ev dt) (hq : Tracks q t q0 s0 eh ev dt) : ¬ LoS p q (h : ℝ) (v : ℝ) :=
+  no_los_of_deviation (by exact_mod_cast hh) (by exact_mod_cast hv) (separatedDev_sound hs) hp0 hq0 hp hq
+
 end Utm

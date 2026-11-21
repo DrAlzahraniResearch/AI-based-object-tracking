@@ -80,90 +80,165 @@ def _guidance(pos, wp, vp: VehicleParams):
     return v
 
 
-def run(air: Airspace, missions: list[Mission], vp: VehicleParams = VehicleParams(),
-        sp: SimParams = SimParams(), policy: SeparationPolicy | None = None) -> SimResult:
-    policy = policy or SeparationPolicy()
-    n = len(missions)
-    starts = np.array([m.meta["start"] for m in missions], float).reshape(n, 3)
-    fleet = KinematicFleet(n, vp, starts)
-    wp_idx = np.zeros(n, int)
-    hold_until = np.full(n, -1.0)
-    state = np.array(["waiting"] * n, dtype=object)
-    t_takeoff = np.full(n, np.nan)
-    t_landed = np.full(n, np.nan)
-    wp_times = [[] for _ in range(n)]           # time each waypoint was reached (holds: when the hold ended)
-    prio = np.array([m.priority for m in missions], int)
-    hubs_xy = np.array([[h.x, h.y] for h in air.hubs]) if air.hubs else np.zeros((0, 2))
-    log_every = max(1, round(1.0 / (sp.log_hz * sp.dt)))
-    times, tracks = [], []
-    open_pairs, los = {}, []
-    bld_hits, nofly_hits = set(), set()
-    t_end = sp.duration_s + sp.max_extra_s
-    wall0 = time.time()
-    step = 0
-    while fleet.t < t_end:
+def follow(m: Mission, wi: int, hold_until: float, p, t: float, sp: SimParams) -> tuple[int, float, bool]:
+    """Waypoint logic shared by Tier A and the PX4 bridge: (new index, new hold end, advanced?).
+    Holds start on arrival; pass-through waypoints above 15 m use the looser pass tolerance."""
+    w = m.waypoints[wi]
+    if hold_until >= 0:                                  # holding at w (drop, on-scene, inspection)
+        if t >= hold_until:
+            return wi + 1, -1.0, True
+        return wi, hold_until, False
+    if (math.hypot(p[0] - w.x, p[1] - w.y) <= sp.pass_tol_m and abs(p[2] - w.z) <= sp.pass_tol_z_m
+            if (w.hold_s <= 0 and w.z >= 15.0 and wi + 1 < len(m.waypoints))
+            else math.dist(p, (w.x, w.y, w.z)) <= sp.arrive_tol_m):
+        if w.hold_s > 0:
+            return wi, t + w.hold_s, False
+        return wi + 1, -1.0, True
+    return wi, hold_until, False
+
+
+def leg_of(m: Mission, wi: int):
+    """(start, end) of the active leg; the first leg starts at meta['start']."""
+    w = m.waypoints[wi]
+    prev = m.waypoints[wi - 1] if wi > 0 else None
+    a = (prev.x, prev.y, prev.z) if prev is not None else tuple(m.meta["start"])
+    return a, (w.x, w.y, w.z)
+
+
+class Simulation:
+    """Steppable Tier A simulation. `run()` drives it to completion; the digital twin drives it tick by tick
+    as the plant (`step`, `dispatch`, `set_route`, `cancel`) and forks rollouts from measured state
+    (`from_state`).
+
+    Missions are indexed by position: vehicle i flies missions[i]. A mission whose `release_t` is +inf
+    waits until `dispatch` gives it a release time; `cancel` removes it (rejected requests)."""
+
+    def __init__(self, air: Airspace, missions: list[Mission], vp: VehicleParams = VehicleParams(),
+                 sp: SimParams = SimParams(), policy: SeparationPolicy | None = None,
+                 monitors: bool = True, log: bool = True):
+        self.air, self.vp, self.sp = air, vp, sp
+        self.policy = policy or SeparationPolicy()
+        self.missions = list(missions)
+        n = self.n = len(missions)
+        starts = np.array([m.meta["start"] for m in missions], float).reshape(n, 3)
+        self.fleet = KinematicFleet(n, vp, starts)
+        self.wp_idx = np.zeros(n, int)
+        self.hold_until = np.full(n, -1.0)
+        self.state = np.array(["waiting"] * n, dtype=object)
+        self.t_takeoff = np.full(n, np.nan)
+        self.t_landed = np.full(n, np.nan)
+        self.wp_times = [[] for _ in range(n)]          # time each waypoint was reached (holds: when the hold ended)
+        self.prio = np.array([m.priority for m in missions], int)
+        self.hubs_xy = np.array([[h.x, h.y] for h in air.hubs]) if air.hubs else np.zeros((0, 2))
+        self.log_every = max(1, round(1.0 / (sp.log_hz * sp.dt)))
+        self.monitors, self.log = monitors, log
+        self.times, self.tracks = [], []
+        self.open_pairs, self.los = {}, []
+        self.bld_hits, self.nofly_hits = set(), set()
+        self.step_no = 0
+        self.wall0 = time.time()
+
+    # ------------------------------------------------------------------ twin hooks
+    def dispatch(self, i: int, mission: Mission):
+        """Give waiting vehicle i its (scheduled) mission; it takes off at mission.release_t."""
+        assert self.state[i] == "waiting", f"vehicle {i} is {self.state[i]}"
+        self.missions[i] = mission
+        self.prio[i] = mission.priority
+        self.fleet.pos[i] = mission.meta["start"]
+
+    def cancel(self, i: int):
+        if self.state[i] == "waiting":
+            self.state[i] = "cancelled"
+
+    def set_route(self, i: int, mission: Mission):
+        """Replace a flying vehicle's remaining route (replan). `mission.waypoints` start from its current
+        position; `mission.meta['start']` is that position (the first leg's origin)."""
+        self.missions[i] = mission
+        self.wp_idx[i] = 0
+        self.hold_until[i] = -1.0
+
+    def progress(self, i: int) -> dict:
+        return {"wp_idx": int(self.wp_idx[i]), "hold_until": float(self.hold_until[i]), "state": str(self.state[i])}
+
+    @classmethod
+    def from_state(cls, air, missions, vp, sp, policy, t, pos, vel, state, wp_idx, hold_until):
+        """Fork a simulation from a (measured) state: used by the twin for prediction rollouts."""
+        sim = cls(air, missions, vp, sp, policy, monitors=False, log=False)
+        sim.fleet.t = t
+        sim.fleet.pos[:] = pos
+        sim.fleet.vel[:] = vel
+        sim.fleet.cmd[:] = vel
+        sim.state[:] = state
+        sim.fleet.on[:] = state == "flying"
+        sim.wp_idx[:] = wp_idx
+        sim.hold_until[:] = hold_until
+        return sim
+
+    # ------------------------------------------------------------------ one tick
+    def step(self) -> bool:
+        """Advance one dt. False when nothing is left to fly after the demand window (the run is over)."""
+        sp, vp, fleet, missions, state = self.sp, self.vp, self.fleet, self.missions, self.state
+        wp_idx, hold_until = self.wp_idx, self.hold_until
         t = fleet.t
         # releases
         for i in np.flatnonzero(state == "waiting"):
             if missions[i].release_t <= t:
                 state[i] = "flying"
                 fleet.on[i] = True
-                t_takeoff[i] = t
+                self.t_takeoff[i] = t
         fly = np.flatnonzero(state == "flying")
         if len(fly) == 0 and t >= sp.duration_s and not (state == "waiting").any():
-            break
+            return False
         desired = np.zeros((len(fly), 3))
         leg_a = np.zeros((len(fly), 3))
         leg_b = np.zeros((len(fly), 3))
         for k, i in enumerate(fly):
             m = missions[i]
-            w = m.waypoints[wp_idx[i]]
             p = fleet.pos[i]
-            advance = False
-            if hold_until[i] >= 0:                       # holding at w (drop, on-scene, inspection)
-                if t >= hold_until[i]:
-                    hold_until[i] = -1.0
-                    advance = True
-            elif (math.hypot(p[0] - w.x, p[1] - w.y) <= sp.pass_tol_m and abs(p[2] - w.z) <= sp.pass_tol_z_m
-                  if (w.hold_s <= 0 and w.z >= 15.0 and wp_idx[i] + 1 < len(m.waypoints))
-                  else math.dist(p, (w.x, w.y, w.z)) <= sp.arrive_tol_m):
-                if w.hold_s > 0:
-                    hold_until[i] = t + w.hold_s
-                else:
-                    advance = True
+            wp_idx[i], hold_until[i], advance = follow(m, int(wp_idx[i]), float(hold_until[i]), p, t, sp)
             if advance:
-                wp_times[i].append(round(t, 2))
-                wp_idx[i] += 1
+                self.wp_times[i].append(round(t, 2))
                 if wp_idx[i] >= len(m.waypoints):
                     state[i] = "landed"
                     continue
-                w = m.waypoints[wp_idx[i]]
+            w = m.waypoints[wp_idx[i]]
             desired[k] = _guidance(p, (w.x, w.y, w.z), vp)   # station-keeps while holding
-            prev = m.waypoints[wp_idx[i] - 1] if wp_idx[i] > 0 else None
-            leg_a[k] = (prev.x, prev.y, prev.z) if prev is not None else m.meta["start"]
-            leg_b[k] = (w.x, w.y, w.z)
+            leg_a[k], leg_b[k] = leg_of(m, int(wp_idx[i]))
         done = fly[state[fly] == "landed"]
         for i in done:
             fleet.on[i] = False
             fleet.vel[i] = 0
             fleet.cmd[i] = 0
-            t_landed[i] = t
+            self.t_landed[i] = t
         keep = state[fly] == "flying"
         fly, desired = fly[keep], desired[keep]
         if len(fly):
-            ctx = {"leg_a": leg_a[keep], "leg_b": leg_b[keep], "priority": prio[fly], "airspace": air,
-                   "hubs_xy": hubs_xy}
-            fleet.command_velocity(fly, policy.adjust(fleet, fly, desired, ctx))
+            ctx = {"leg_a": leg_a[keep], "leg_b": leg_b[keep], "priority": self.prio[fly], "airspace": self.air,
+                   "hubs_xy": self.hubs_xy}
+            fleet.command_velocity(fly, self.policy.adjust(fleet, fly, desired, ctx))
         fleet.step(sp.dt)
-        # safety monitors
+        self._monitor()
+        if self.log and self.step_no % self.log_every == 0:
+            self.times.append(fleet.t)
+            snap = np.full((self.n, 3), np.nan)
+            snap[fleet.on] = fleet.pos[fleet.on]
+            self.tracks.append(snap)
+        self.step_no += 1
+        return True
+
+    def _monitor(self):
+        """Building / no-fly intrusions and loss-of-separation events (merged over contiguous time)."""
+        fleet, sp, air, hubs_xy = self.fleet, self.sp, self.air, self.hubs_xy
         air_ids = np.flatnonzero(fleet.on & (fleet.pos[:, 2] > 0.5))
-        for i in air_ids:
-            x, y, z = fleet.pos[i]
-            if i not in bld_hits and air.inside_building(x, y, z):
-                bld_hits.add(int(i))
-            if i not in nofly_hits and air.in_no_fly(x, y, z):
-                nofly_hits.add(int(i))
+        if self.monitors:
+            for i in air_ids:
+                x, y, z = fleet.pos[i]
+                if i not in self.bld_hits and air.inside_building(x, y, z):
+                    self.bld_hits.add(int(i))
+                if i not in self.nofly_hits and air.in_no_fly(x, y, z):
+                    self.nofly_hits.add(int(i))
         current = set()
+        open_pairs = self.open_pairs
         if len(air_ids) > 1:
             tree = cKDTree(fleet.pos[air_ids, :2])
             for a, b in tree.query_pairs(sp.h_sep_m):
@@ -189,22 +264,30 @@ def run(air: Airspace, missions: list[Mission], vp: VehicleParams = VehicleParam
                         ev.update(min_dist_m=d3, x=float(mid[0]), y=float(mid[1]), z=float(mid[2]))
         for key in list(open_pairs):
             if key not in current:
-                los.append(open_pairs.pop(key))
-        if step % log_every == 0:
-            times.append(fleet.t)
-            snap = np.full((n, 3), np.nan)
-            snap[fleet.on] = fleet.pos[fleet.on]
-            tracks.append(snap)
-        step += 1
-    los.extend(open_pairs.values())
-    status = [{"mission": m.id, "kind": m.kind, "release_t": m.release_t, "takeoff_t": _f(t_takeoff[i]),
-               "landed_t": _f(t_landed[i]), "state": str(state[i]), "wp_times": wp_times[i]}
-              for i, m in enumerate(missions)]
-    return SimResult(missions, np.array(times), np.array(tracks) if tracks else np.zeros((0, n, 3)), status,
-                     sorted(los, key=lambda e: e["t_start"]),
-                     {"building": sorted(bld_hits), "no_fly": sorted(nofly_hits)}, time.time() - wall0,
-                     {"vehicle": asdict(vp), "sim": asdict(sp), "policy": policy.name,
-                      "policy_info": policy.info()})
+                self.los.append(open_pairs.pop(key))
+
+    def result(self) -> SimResult:
+        los = self.los + list(self.open_pairs.values())
+        status = [{"mission": m.id, "kind": m.kind, "release_t": m.release_t, "takeoff_t": _f(self.t_takeoff[i]),
+                   "landed_t": _f(self.t_landed[i]), "state": str(self.state[i]), "wp_times": self.wp_times[i]}
+                  for i, m in enumerate(self.missions)]
+        return SimResult(self.missions, np.array(self.times),
+                         np.array(self.tracks) if self.tracks else np.zeros((0, self.n, 3)), status,
+                         sorted(los, key=lambda e: e["t_start"]),
+                         {"building": sorted(self.bld_hits), "no_fly": sorted(self.nofly_hits)},
+                         time.time() - self.wall0,
+                         {"vehicle": asdict(self.vp), "sim": asdict(self.sp), "policy": self.policy.name,
+                          "policy_info": self.policy.info()})
+
+
+def run(air: Airspace, missions: list[Mission], vp: VehicleParams = VehicleParams(),
+        sp: SimParams = SimParams(), policy: SeparationPolicy | None = None) -> SimResult:
+    sim = Simulation(air, missions, vp, sp, policy)
+    t_end = sp.duration_s + sp.max_extra_s
+    while sim.fleet.t < t_end:
+        if not sim.step():
+            break
+    return sim.result()
 
 
 def _f(v):

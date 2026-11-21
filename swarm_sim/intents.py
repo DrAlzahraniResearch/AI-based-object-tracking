@@ -40,6 +40,9 @@ class IntentParams:
     slack_per_min: float = 2.0          # extra slack (s) per minute since release
     max_piece_m: float = 50.0           # horizontal piece length (shorter = tighter boxes on diagonals)
     max_piece_z_m: float = 10.0         # vertical piece height: a descent blocks one 10 m slice at a time
+    takeoff_s: float = 0.0              # release -> lift-off lag on the pad (PX4: spool-up + MPC_TKO_RAMP_T ramp, ~4 s)
+    terminal_lateral_buffer_m: float | None = None   # lateral buffer of terminal boxes (None: lateral_buffer_m).
+                                        # Milestone 5 uses 5 m: PX4 tracked its plan within 3.5 m (p99, milestone 4.5)
 
 
 @dataclass
@@ -55,6 +58,8 @@ class Box4:
     t0: float
     t1: float
     phase: str = "en_route"             # en_route | terminal
+    flow: str = ""                      # "dep": the departure climb at the pad (leading terminal boxes);
+                                        # "arr": after the approach fix (or trailing terminal boxes); "": en route
 
     def as_int(self) -> tuple:
         """Checker units: millimetres and milliseconds, rounded outwards (conservative)."""
@@ -77,27 +82,37 @@ def _leg_time(a, b, vp: VehicleParams) -> float:
     return max(th, tv) + 0.5 * min(th, tv)    # partially overlapped climb and cruise in the guidance law
 
 
-def planned_schedule(m: Mission, vp: VehicleParams) -> list[tuple]:
-    """[(a_xyz, b_xyz, t_start, t_end)] per leg, plus holds as zero-length legs."""
+def planned_schedule(m: Mission, vp: VehicleParams, takeoff_s: float = 0.0) -> list[tuple]:
+    """[(a_xyz, b_xyz, t_start, t_end)] per leg, plus holds as zero-length legs. A take-off lag (flights
+    that start on their pad, not mid-air replans) is a zero-length leg at the pad."""
+    return [leg[:4] for leg in _schedule(m, vp, takeoff_s)]
+
+
+def _schedule(m: Mission, vp: VehicleParams, takeoff_s: float = 0.0) -> list[tuple]:
+    """planned_schedule with the waypoint index of each leg as a fifth element (-1: take-off lag)."""
     start = tuple(m.meta["start"])
     t = m.release_t
     out, prev = [], start
-    for w in m.waypoints:
+    pad = m.meta.get("pad", m.meta["start"])
+    if takeoff_s > 0 and start[2] <= pad[2] + 0.5 and math.dist(start[:2], pad[:2]) < 1.0:
+        out.append((start, start, t, t + takeoff_s, -1))
+        t += takeoff_s
+    for wi, w in enumerate(m.waypoints):
         cur = (w.x, w.y, w.z)
         dt = _leg_time(prev, cur, vp)
-        out.append((prev, cur, t, t + dt))
+        out.append((prev, cur, t, t + dt, wi))
         t += dt
         if w.hold_s > 0:
-            out.append((cur, cur, t, t + w.hold_s))
+            out.append((cur, cur, t, t + w.hold_s, wi))
             t += w.hold_s
         prev = cur
     return out
 
 
 def mission_intents(m: Mission, vp: VehicleParams, ip: IntentParams = IntentParams()) -> list[Box4]:
-    boxes = []
-    pad = np.asarray(m.meta["start"][:2], float)
-    for k, (a, b, ta, tb) in enumerate(planned_schedule(m, vp)):
+    boxes, wis = [], []
+    pad = np.asarray(m.meta.get("pad", m.meta["start"])[:2], float)    # replans start mid-air
+    for k, (a, b, ta, tb, wi) in enumerate(_schedule(m, vp, ip.takeoff_s)):
         L = math.dist(a[:2], b[:2])
         n = max(1, math.ceil(L / ip.max_piece_m), math.ceil(abs(b[2] - a[2]) / ip.max_piece_z_m))
         for i in range(n):
@@ -107,13 +122,31 @@ def mission_intents(m: Mission, vp: VehicleParams, ip: IntentParams = IntentPara
             t0, t1 = ta + (tb - ta) * u0, ta + (tb - ta) * u1
             slack = ip.slack_s + ip.slack_per_min * (t1 - m.release_t) / 60.0
             term = max(np.hypot(*(p0[:2] - pad)), np.hypot(*(p1[:2] - pad))) <= ip.terminal_radius_m
+            lb = ip.terminal_lateral_buffer_m if (term and ip.terminal_lateral_buffer_m is not None) else ip.lateral_buffer_m
             boxes.append(Box4(m.id, k,
-                              min(p0[0], p1[0]) - ip.lateral_buffer_m, max(p0[0], p1[0]) + ip.lateral_buffer_m,
-                              min(p0[1], p1[1]) - ip.lateral_buffer_m, max(p0[1], p1[1]) + ip.lateral_buffer_m,
+                              min(p0[0], p1[0]) - lb, max(p0[0], p1[0]) + lb,
+                              min(p0[1], p1[1]) - lb, max(p0[1], p1[1]) + lb,
                               max(0.0, min(p0[2], p1[2]) - ip.vertical_buffer_m),
                               max(p0[2], p1[2]) + ip.vertical_buffer_m,
                               t0 - slack, t1 + slack, "terminal" if term else "en_route"))
+            wis.append(wi)
+    _flows(m, boxes, wis)
     return boxes
+
+
+def _flows(m: Mission, boxes: list[Box4], wis: list[int]) -> None:
+    """Tag departure boxes (terminal boxes before the first en-route box) and arrival boxes (legs after
+    an approach fix, or terminal boxes after the last en-route box when the route has no fix)."""
+    fix = next((i for i, w in enumerate(m.waypoints) if w.tag == "fix"), None)
+    first_enr = next((k for k, b in enumerate(boxes) if b.phase == "en_route"), len(boxes))
+    last_enr = max((k for k, b in enumerate(boxes) if b.phase == "en_route"), default=-1)
+    for k, b in enumerate(boxes):
+        if fix is not None and wis[k] > fix:
+            b.flow = "arr"
+        elif k < first_enr and b.phase == "terminal":
+            b.flow = "dep"
+        elif fix is None and k > last_enr and b.phase == "terminal":
+            b.flow = "arr"
 
 
 # ------------------------------------------------------------------ Python reference checker
@@ -142,6 +175,17 @@ def separated_hv_matrix(A: np.ndarray, B: np.ndarray, h: int, v: int) -> np.ndar
             (A[..., 1] + h <= B[..., 0]) | (B[..., 1] + h <= A[..., 0]) |
             (A[..., 3] + h <= B[..., 2]) | (B[..., 3] + h <= A[..., 2]) |
             (A[..., 5] + v <= B[..., 4]) | (B[..., 5] + v <= A[..., 4]))
+
+
+def inflate_ref(b: tuple, eh: int, ev: int, dt: int) -> tuple:
+    """Same as Utm.Box.inflate."""
+    x0, x1, y0, y1, z0, z1, t0, t1 = b
+    return (x0 - eh, x1 + eh, y0 - eh, y1 + eh, z0 - ev, z1 + ev, t0 - dt, t1 + dt)
+
+
+def separated_dev_ref(a: tuple, b: tuple, h: int, v: int, eh: int, ev: int, dt: int) -> bool:
+    """Same decision as Utm.separatedDev (Theorem 3): cylinder check on both boxes widened by the error bound."""
+    return separated_hv_ref(inflate_ref(a, eh, ev, dt), inflate_ref(b, eh, ev, dt), h, v)
 
 
 def inside_ref(b: tuple, m: int, x: int, y: int, z: int, t: int) -> bool:

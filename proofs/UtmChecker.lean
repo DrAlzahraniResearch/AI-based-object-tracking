@@ -54,6 +54,17 @@ def inside (b : Box) (m x y z t : Int) : Bool :=
   decide (b.z0 + m ≤ z) && decide (z + m ≤ b.z1) &&
   decide (b.t0 ≤ t) && decide (t ≤ b.t1)
 
+/-- Volume `b` widened by `eh` along x and y, `ev` along z and `dt` in time (each side). -/
+def Box.inflate (b : Box) (eh ev dt : Int) : Box :=
+  ⟨b.x0 - eh, b.x1 + eh, b.y0 - eh, b.y1 + eh, b.z0 - ev, b.z1 + ev, b.t0 - dt, b.t1 + dt⟩
+
+/-- Deviation-tolerant cylinder check (Theorem 3): `true` iff the two volumes, each widened by the
+tracking-error bound (`eh` horizontal, `ev` vertical, `dt` timing), are cylinder-separated. Proved
+sound in `UtmProofs.Refinement` (`checker_no_los_dev`): aircraft that stay within that bound of a
+point of their own nominal volume are never in loss of separation. -/
+def separatedDev (a b : Box) (h v eh ev dt : Int) : Bool :=
+  separatedHV (a.inflate eh ev dt) (b.inflate eh ev dt) h v
+
 /-! ## C ABI
 
 `Int64` crosses the FFI boundary as a plain 64-bit integer and `UInt8` as
@@ -85,8 +96,18 @@ def insideC (x0 x1 y0 y1 z0 z1 t0 t1 m x y z t : Int64) : UInt8 :=
             m.toInt x.toInt y.toInt z.toInt t.toInt
   then 1 else 0
 
+/-- C: `uint8_t utm_separated_dev(int64_t ax0, ..., int64_t bt1, int64_t h, int64_t v,
+int64_t eh, int64_t ev, int64_t dt)` -/
+@[export utm_separated_dev]
+def separatedDevC (ax0 ax1 ay0 ay1 az0 az1 at0 at1
+                   bx0 bx1 by0 by1 bz0 bz1 bt0 bt1 h v eh ev dt : Int64) : UInt8 :=
+  if separatedDev ⟨ax0.toInt, ax1.toInt, ay0.toInt, ay1.toInt, az0.toInt, az1.toInt, at0.toInt, at1.toInt⟩
+                  ⟨bx0.toInt, bx1.toInt, by0.toInt, by1.toInt, bz0.toInt, bz1.toInt, bt0.toInt, bt1.toInt⟩
+                  h.toInt v.toInt eh.toInt ev.toInt dt.toInt
+  then 1 else 0
+
 /-- ABI version, bumped whenever an exported signature changes. -/
 @[export utm_abi_version]
-def abiVersion (_ : Unit) : UInt32 := 2
+def abiVersion (_ : Unit) : UInt32 := 3
 
 end Utm

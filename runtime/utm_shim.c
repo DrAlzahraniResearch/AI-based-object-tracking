@@ -11,6 +11,9 @@ extern uint8_t  utm_separated_hv(uint64_t, uint64_t, uint64_t, uint64_t, uint64_
                                  uint64_t, uint64_t);
 extern uint8_t  utm_inside(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                            uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+extern uint8_t  utm_separated_dev(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                                  uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                                  uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 extern uint32_t utm_abi_version(lean_object *);
 extern lean_object *initialize_UtmChecker(uint8_t builtin);
 extern void lean_initialize_runtime_module(void);   /* in libleanrt; not declared in lean.h */
@@ -79,5 +82,23 @@ int64_t utm_count_against_hv(const int64_t *cand, int64_t m, const int64_t *othe
     for (int64_t i = 0; i < m; i++)
         for (int64_t j = 0; j < n; j++)
             if (!utm_check_separated_hv(cand + 8 * i, others + 8 * j, h, v)) bad++;
+    return bad;
+}
+
+int utm_check_separated_dev(const int64_t a[8], const int64_t b[8], int64_t h, int64_t v,
+                            int64_t eh, int64_t ev, int64_t dt) {
+    if (!g_ready) return -1;
+    return utm_separated_dev(U(a[0]), U(a[1]), U(a[2]), U(a[3]), U(a[4]), U(a[5]), U(a[6]), U(a[7]),
+                             U(b[0]), U(b[1]), U(b[2]), U(b[3]), U(b[4]), U(b[5]), U(b[6]), U(b[7]),
+                             U(h), U(v), U(eh), U(ev), U(dt));
+}
+
+int64_t utm_count_against_dev(const int64_t *cand, int64_t m, const int64_t *others, int64_t n, int64_t h, int64_t v,
+                              int64_t eh, int64_t ev, int64_t dt) {
+    if (!g_ready) return -1;
+    int64_t bad = 0;
+    for (int64_t i = 0; i < m; i++)
+        for (int64_t j = 0; j < n; j++)
+            if (!utm_check_separated_dev(cand + 8 * i, others + 8 * j, h, v, eh, ev, dt)) bad++;
     return bad;
 }

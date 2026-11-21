@@ -6,6 +6,9 @@
  *   volume at the same time  ==>  their Euclidean distance >= buf          (Theorem 1)
  *   utm_check_separated_hv(a, b, h, v) == 1  and both inside at the same time
  *   ==>  horizontal distance >= h  or  vertical distance >= v (no LoS)      (Theorem 2)
+ *   utm_check_separated_dev(a, b, h, v, eh, ev, dt) == 1  and each aircraft within
+ *   (eh per horizontal axis, ev vertically, dt in time) of a point of its own
+ *   nominal volume  ==>  no LoS                                            (Theorem 3)
  *
  * Units: millimetres (x, y, z, local ENU) and milliseconds (t); integers only.
  * A box is int64_t[8] = {x0, x1, y0, y1, z0, z1, t0, t1}, closed intervals.
@@ -18,7 +21,7 @@
 extern "C" {
 #endif
 
-#define UTM_ABI_VERSION 2
+#define UTM_ABI_VERSION 3
 /* leanc compiles with -fvisibility=hidden; the public API must opt back in. */
 #define UTM_API __attribute__((visibility("default")))
 
@@ -34,6 +37,11 @@ UTM_API int64_t  utm_count_conflicts_hv(const int64_t *boxes, const int64_t *gro
 /* Count pairs (candidate i, other j) NOT cylinder-separated. cand: m x 8, others: n x 8. */
 UTM_API int64_t  utm_count_against_hv(const int64_t *cand, int64_t m, const int64_t *others, int64_t n,
                                       int64_t h, int64_t v);
+/* Theorem 3: nominal volumes, error bound eh (x, y), ev (z), dt (time). */
+UTM_API int      utm_check_separated_dev(const int64_t a[8], const int64_t b[8], int64_t h, int64_t v,
+                                         int64_t eh, int64_t ev, int64_t dt);              /* 1/0, -1 */
+UTM_API int64_t  utm_count_against_dev(const int64_t *cand, int64_t m, const int64_t *others, int64_t n,
+                                       int64_t h, int64_t v, int64_t eh, int64_t ev, int64_t dt);
 
 #ifdef __cplusplus
 }

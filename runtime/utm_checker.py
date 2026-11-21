@@ -4,6 +4,7 @@
     chk = VerifiedChecker()                       # loads runtime/build/libutm_checker.so, starts the Lean runtime
     chk.separated(a, b, buf_mm)                   # a, b: (x0,x1,y0,y1,z0,z1,t0,t1) in mm / ms  (Theorem 1)
     chk.separated_hv(a, b, h_mm, v_mm)            # cylinder form: no LoS                       (Theorem 2)
+    chk.separated_dev(a, b, h_mm, v_mm, eh_mm, ev_mm, dt_ms)   # nominal boxes + tracking error (Theorem 3)
     chk.inside(box, margin_mm, x, y, z, t)
     chk.count_conflicts(boxes, groups, buf_mm)    # pairs from different groups that are NOT separated
 
@@ -21,7 +22,7 @@ import numpy as np
 
 _DEFAULT = Path(__file__).resolve().parent / "build" / "libutm_checker.so"
 _I64x8 = ctypes.c_int64 * 8
-ABI_VERSION = 2
+ABI_VERSION = 3
 INT64_MIN, INT64_MAX = -(2 ** 63), 2 ** 63 - 1
 
 
@@ -82,6 +83,10 @@ class VerifiedChecker:
             lib.utm_count_conflicts_hv.restype = ctypes.c_int64
             lib.utm_count_against_hv.argtypes = [P, ctypes.c_int64, P, ctypes.c_int64, ctypes.c_int64, ctypes.c_int64]
             lib.utm_count_against_hv.restype = ctypes.c_int64
+            lib.utm_check_separated_dev.argtypes = [_I64x8, _I64x8] + [ctypes.c_int64] * 5
+            lib.utm_check_separated_dev.restype = ctypes.c_int
+            lib.utm_count_against_dev.argtypes = [P, ctypes.c_int64, P, ctypes.c_int64] + [ctypes.c_int64] * 5
+            lib.utm_count_against_dev.restype = ctypes.c_int64
             lib.utm_check_inside.argtypes = [_I64x8] + [ctypes.c_int64] * 5
             lib.utm_check_inside.restype = ctypes.c_int
             lib.utm_count_conflicts.argtypes = [ctypes.POINTER(ctypes.c_int64), ctypes.POINTER(ctypes.c_int64),
@@ -146,3 +151,20 @@ class VerifiedChecker:
         P = ctypes.POINTER(ctypes.c_int64)
         return int(self.lib.utm_count_against_hv(C.ctypes.data_as(P), len(C), O.ctypes.data_as(P), len(O),
                                                  int(h), int(v)))
+
+    def separated_dev(self, a, b, h: int, v: int, eh: int, ev: int, dt: int) -> bool:
+        """Theorem 3: nominal boxes a, b; tracking error eh (per horizontal axis), ev (vertical), dt (time)."""
+        r = self.lib.utm_check_separated_dev(self._box(a), self._box(b), int(h), int(v), int(eh), int(ev), int(dt))
+        if r < 0:
+            raise CheckerUnavailable("checker not initialised")
+        return bool(r)
+
+    def count_against_dev(self, cand, others, h: int, v: int, eh: int, ev: int, dt: int) -> int:
+        C, O = self._arr(cand), self._arr(others)
+        P = ctypes.POINTER(ctypes.c_int64)
+        return int(self.lib.utm_count_against_dev(C.ctypes.data_as(P), len(C), O.ctypes.data_as(P), len(O),
+                                                  int(h), int(v), int(eh), int(ev), int(dt)))
+
+    def inside_many(self, boxes, margin: int, x: int, y: int, z: int, t: int) -> np.ndarray:
+        """inside() for each row of `boxes` (n x 8) -> (n,) bool."""
+        return np.array([self.inside(b, margin, x, y, z, t) for b in self._arr(boxes)], bool)

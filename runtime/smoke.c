@@ -17,6 +17,10 @@ int main(void) {
          utm_check_separated_hv(a, h2, 5, 100) == 1 && utm_check_separated_hv(a, h2, 6, 100) == 0;
     int64_t pair[16] = {0, 10, 0, 10, 0, 10, 0, 10, 15, 20, 0, 10, 0, 10, 0, 10};
     ok = ok && utm_count_against_hv(a, 1, pair, 2, 5, 5) == 1 && utm_count_against_hv(a, 1, pair, 2, 4, 5) == 1;
+    /* Theorem 3: x gap 5 = h 1 + 2 x eh 2 exactly; time gap 1 is lost to dt 1 */
+    ok = ok && utm_check_separated_dev(a, h2, 1, 100, 2, 0, 0) == 1 && utm_check_separated_dev(a, h2, 1, 100, 3, 0, 0) == 0 &&
+         utm_check_separated_dev(a, d, 5, 5, 0, 0, 0) == 1 && utm_check_separated_dev(a, d, 5, 5, 0, 0, 1) == 0 &&
+         utm_count_against_dev(a, 1, pair, 2, 1, 100, 2, 0, 0) == 1;
     printf("utm_checker abi %u: %s\n", utm_version(), ok ? "OK" : "FAIL");
     return ok ? 0 : 1;
 }

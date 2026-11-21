@@ -118,7 +118,7 @@ def test_tight_delay_budget_rejects(air):
 
 def test_verified_search_matches_reference(air, missions):
     try:
-        from runtime.utm_checker import CheckerUnavailable, VerifiedChecker
+        from runtime.utm_checker import VerifiedChecker
         chk = VerifiedChecker()
     except Exception as e:  # CheckerUnavailable, or the library missing in the eval image
         pytest.skip(f"verified checker not available: {e}")

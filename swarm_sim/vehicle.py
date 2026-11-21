@@ -51,6 +51,7 @@ class KinematicFleet(VehicleAPI):
         self.vel = np.zeros((n, 3))
         self.cmd = np.zeros((n, 3))
         self.on = np.zeros(n, bool)
+        self.v_cap = np.full(n, np.inf)      # per-vehicle horizontal speed cap (degraded vehicles; twin rollouts)
         self.t = 0.0
 
     # -------------------------------------------------------------- API
@@ -67,13 +68,14 @@ class KinematicFleet(VehicleAPI):
         return self.t
 
     def command_velocity(self, ids, v):
-        self.cmd[ids] = self._limit_velocity(np.atleast_2d(np.asarray(v, float)))
+        self.cmd[ids] = self._limit_velocity(np.atleast_2d(np.asarray(v, float)), ids)
 
     # -------------------------------------------------------------- dynamics
-    def _limit_velocity(self, v):
+    def _limit_velocity(self, v, ids=None):
         v = v.copy()
         sp = np.linalg.norm(v[:, :2], axis=1, keepdims=True)
-        v[:, :2] *= np.minimum(1.0, self.p.v_xy_max / np.maximum(sp, 1e-9))
+        vmax = self.p.v_xy_max if ids is None else np.minimum(self.p.v_xy_max, self.v_cap[ids])[:, None]
+        v[:, :2] *= np.minimum(1.0, vmax / np.maximum(sp, 1e-9))
         v[:, 2] = np.clip(v[:, 2], -self.p.v_down_max, self.p.v_up_max)
         return v
 
@@ -90,12 +92,9 @@ class KinematicFleet(VehicleAPI):
         self.t += dt
 
 
-class MavsdkFleet(VehicleAPI):  # pragma: no cover - Tier B, needs PX4 SITL
-    """Tier B placeholder: one MAVSDK System per PX4 SITL instance (milestone 6).
-
-    Planned: connect to udp://:14540+i, arm/takeoff, then offboard velocity
-    setpoints (VelocityNedYaw; convert ENU->NED). Not implemented yet.
-    """
+class MavsdkFleet(VehicleAPI):  # pragma: no cover - Tier B
+    """Superseded by `swarm_sim.twin.px4.Px4Plant` (milestone 4.5): PX4 SITL instances flown through MAVSDK
+    behind the twin's plant interface (telemetry in, dispatch / set_route out)."""
 
     def __init__(self, *_, **__):
-        raise NotImplementedError("Tier B (PX4 SITL + MAVSDK) is milestone 6; see docs/architecture.md")
+        raise NotImplementedError("use swarm_sim.twin.px4.Px4Plant (see docs/twin.md)")

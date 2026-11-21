@@ -1,0 +1,41 @@
+# Digital twin (milestone 4.5). Layered on configs/tier_a.yaml (world, demand, intents, ORCA, scheduler).
+# The twin plans with the Tier A model (tier_a.yaml `vehicle`); the plant is the "real" system.
+twin:                              # swarm_sim.twin.core.TwinParams
+  tick_s: 0.2
+  replan: true
+  replan_cooldown_s: 20
+  max_hover_s: 120
+  calibrate: true
+  calibrate_every_s: 30
+  predict_every_s: 10
+  horizon_s: 60
+  rollout_dt: 0.2
+plant_tier_a:                      # swarm_sim.twin.telemetry.PlantParams: Tier A as the stand-in real system
+  rate_hz: 5
+  latency_s: 0.25
+  noise_h_m: 0.7                   # autopilot position estimate noise (1 sigma)
+  noise_v_m: 0.5
+  noise_vel_ms: 0.2
+  vehicle:                         # ASSUMPTION (scenario): the fleet is configured slower than the planner
+    v_xy_max: 8.5                  #   assumes (MPC_XY_VEL_MAX 8.5 vs cruise 10)
+  faults:                          # one vehicle degrades mid-flight (e.g. a motor or battery issue)
+    - {t: 600, nth_flying: 0, v_xy_max: 4.0}
+  seed: 7
+plant_px4:                         # Tier B: PX4 SITL (SIH) through MAVSDK
+  speed_factor: 2                  # lockstep speed-up (needs CPU headroom; 1 = real time)
+  rate_hz: 10
+  setpoint_hz: 20
+  missions: 2                      # first N deliveries of the seed's demand, one PX4 instance each
+  stagger_s: 20                    # re-timed releases: 5 s, 25 s, ...
+hubs:                              # milestone 5: hub sequencing (swarm_sim/hubs.py)
+  mode: "off"                      # off | sequence (or --hubs)
+  approach_fix_m: 100              # inbound flights end their cruise at a fix this far from the hub centre (sequence,
+                                   # or --approach-fix for a like-for-like "off" baseline on the same routes)
+  lead_s: 20                       # request a landing slot this long before the fix
+  hold_step_s: 5
+  max_hold_s: 300                  # then land anyway ("contingent")
+  terminal_lateral_buffer_m: 5     # lateral buffer of terminal boxes (PX4 tracked its plan within 3.5 m p99,
+                                   # milestone 4.5); en-route boxes keep 20 m
+  approach_alt_m: 25               # arrivals descend on the holding ring, then cross to the pad at this altitude
+  pad_spacing_m: null              # override the hubs' pad spacing (8 m compact; 40 m = 30 m + 2 x 5 m buffers:
+                                   # every pad column certifiable against every other)

@@ -1,2 +1,3 @@
 { global: utm_init; utm_version; utm_check_separated; utm_check_separated_hv; utm_check_inside;
-          utm_count_conflicts; utm_count_conflicts_hv; utm_count_against_hv; local: *; };
+          utm_count_conflicts; utm_count_conflicts_hv; utm_count_against_hv;
+          utm_check_separated_dev; utm_count_against_dev; local: *; };

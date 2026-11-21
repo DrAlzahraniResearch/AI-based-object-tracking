@@ -61,6 +61,8 @@ class RoutingParams:
     leg_check_margin_m: float = 2.0    # ... by this much below the leg's lowest altitude
     no_fly_margin_m: float = 20.0      # every leg keeps this far from no-fly zones (= intent lateral buffer,
                                        # > the 15 m ORCA corridor)
+    approach_fix_m: float = 0.0        # > 0: inbound flights end their cruise at an approach fix this far from the
+                                       # hub centre on the inbound bearing, then approach the pad (milestone 5)
 
 
 def cruise_layer(air: Airspace, a, b, rp: RoutingParams) -> float | None:
@@ -84,7 +86,7 @@ def crosses_no_fly(air: Airspace, a, b, margin: float = 0.0) -> bool:
     return any(Polygon(n.polygon).distance(seg) <= margin for n in air.no_fly)
 
 
-def out_and_back(air: Airspace, start, target_wps: list, rp: RoutingParams):
+def out_and_back(air: Airspace, start, target_wps: list, rp: RoutingParams, hub_xy=None):
     """start (x, y, z_pad) -> climb -> cruise -> target waypoints -> cruise -> back to start. None if infeasible."""
     sx, sy, sz = start
     tx, ty = target_wps[0].x, target_wps[0].y
@@ -100,9 +102,23 @@ def out_and_back(air: Airspace, start, target_wps: list, rp: RoutingParams):
             return None
     wps += target_wps
     lx, ly = target_wps[-1].x, target_wps[-1].y
-    wps += [Waypoint(lx, ly, z_back, tag="climb"), Waypoint(sx, sy, z_back, tag="cruise"),
-            Waypoint(sx, sy, sz, tag="land")]
+    if rp.approach_fix_m > 0 and hub_xy is not None:
+        fx, fy = approach_fix(hub_xy, (lx, ly), rp.approach_fix_m)
+        if math.hypot(lx - hub_xy[0], ly - hub_xy[1]) < rp.approach_fix_m + 20:
+            return None                         # target inside the hub's approach ring
+        wps += [Waypoint(lx, ly, z_back, tag="climb"), Waypoint(fx, fy, z_back, tag="fix"),
+                Waypoint(sx, sy, z_back, tag="approach"), Waypoint(sx, sy, sz, tag="land")]
+    else:
+        wps += [Waypoint(lx, ly, z_back, tag="climb"), Waypoint(sx, sy, z_back, tag="cruise"),
+                Waypoint(sx, sy, sz, tag="land")]
     return wps if route_clear(air, start, wps, rp) else None
+
+
+def approach_fix(hub_xy, toward_xy, radius: float):
+    """Point `radius` m from the hub centre on the bearing toward `toward_xy` (the inbound bearing)."""
+    dx, dy = toward_xy[0] - hub_xy[0], toward_xy[1] - hub_xy[1]
+    d = math.hypot(dx, dy) or 1.0
+    return hub_xy[0] + dx / d * radius, hub_xy[1] + dy / d * radius
 
 
 def route_clear(air: Airspace, start, wps: list, rp: RoutingParams) -> bool:
@@ -201,7 +217,7 @@ def _make(air, kind, t, rng, rp, pad_next):
         hub = air.hubs[rng.integers(len(air.hubs))]
     pad = pad_next[hub.name] % max(1, hub.pads)
     px, py = hub.pad_positions()[pad]
-    wps = out_and_back(air, (px, py, hub.elevation), target, rp)
+    wps = out_and_back(air, (px, py, hub.elevation), target, rp, (hub.x, hub.y))
     if wps is None:
         return None
     pad_next[hub.name] += 1

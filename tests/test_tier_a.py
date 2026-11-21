@@ -11,7 +11,7 @@ from shapely.geometry import LineString, Point, Polygon
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from swarm_sim.intents import IntentParams, inside_ref, mission_intents, separated_ref  # noqa: E402
-from swarm_sim.metrics import conformance, summarise  # noqa: E402
+from swarm_sim.metrics import summarise  # noqa: E402
 from swarm_sim.missions import RoutingParams, cruise_layer, generate_missions, route_clear  # noqa: E402
 from swarm_sim.osm import LocalFrame, building_height, hub_clearance_problems, parse_length_m, read_osm, world_sdf  # noqa: E402
 from swarm_sim.sim import SimParams, run  # noqa: E402

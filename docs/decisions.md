@@ -76,3 +76,107 @@ a delivery or inspection is rejected. Throughput lost is reported as rejections.
 **S21. The search is untrusted; the audit is not.** The scheduler searches with a vectorised Python
 reference for speed. Every accepted plan is re-checked by the Lean-verified checker in the audit, and
 a test checks that a verified-checker search makes identical decisions.
+
+## Milestone 4.5: digital twin
+
+**S22. The twin never reads a simulator's internals.** It sees timestamped, noisy, late `Telemetry`
+and acts through `dispatch` / `set_route` / `cancel`. Tier A, PX4 and a replayed log are interchangeable
+plants. Ground truth stays inside sim plants and is used only to score the twin afterwards.
+
+**S23. Tier A as the stand-in plant, with a deliberate mismatch.** The plant's fleet is limited to
+8.5 m/s while the planner assumes 10 m/s cruise (a payload variant or a configuration mismatch), one
+vehicle drops to 4 m/s at t = 600 s, and telemetry has 0.7 m / 0.5 m noise and 0.25 s latency. This
+is a scenario assumption (`configs/twin.yaml`), chosen so that the twin has something to detect,
+learn and correct. `--no-faults` gives the matched control.
+
+**S24. Tier B is PX4 SIH, flown with the same guidance as Tier A.** PX4 v1.16.2's built-in simulator
+needs no Gazebo and runs headless and faster than real time. The bridge runs the shared waypoint logic
+(`sim.follow`) and guidance law and sends PX4 offboard velocity setpoints, so a Tier A vs Tier B
+difference is the autopilot (controllers, estimator, SIH dynamics), not the mission logic. PX4's LAND
+mode does the final touchdown. Gazebo stays for rendering and sensors (milestone 6).
+
+**S25. Conformance online, on estimates, with the verified checker.** The monitor uses the Lean
+`inside` on filtered estimates (2 s to flag, 2 s to clear, to ride out noise at box faces). An estimate
+below ground is clamped to 0. The offline audit re-judges conformance on ground truth.
+
+**S26. Replan = withdraw, then re-certify from the measured position.** Airborne holds of 0–120 s are
+tried until the new boxes certify against every other flight's boxes in force; otherwise the flight is
+`contingent` (flown, registered, counted). If still non-conforming after the 20 s cooldown, the twin
+tries again. Not replanned: the final descent at the pad (`landing_overrun`, hub sequencing).
+
+**S27. Calibration is one vote per vehicle.** Fleet speeds are the median of per-vehicle medians over
+the 20 most recent vehicles (at least 3). A first version used one pooled median, and in light traffic a
+single degraded vehicle pulled the fleet model to 4 m/s, after which every healthy flight ran early
+against its plan. A vehicle measurably slower than the model (> 3 %) is replanned and predicted with its
+own speed. Lift-off lag (release to 0.5 m) is calibrated the same way when it exceeds 1 s.
+
+**S28. Prediction forks Tier A from the twin's state.** Positions, velocities, waypoint progress,
+holds, per-vehicle speed caps and imminent take-offs seed a 60 s rollout every 10 s with the same
+separation policy. Scored against what happens: position error at +10/30/60 s, and LoS recall
+(with lead time) and precision against the plant's en-route LoS events. The prediction benchmark
+disables strategic deconfliction (`--admit-all`) and ORCA, otherwise there are no conflicts to predict.
+
+**S29. Plan versions are the unit of audit.** Every admission and replan registers a version with its
+validity window. Two versions in force together were checked online by whichever came later; the
+audit re-checks each such claim with the verified checker over the shared window, then checks every
+ground-truth sample.
+
+**S30. Theorem 3 (deviation bounds) makes the fidelity gap a certificate.** Measured tracking error
+(eh, ev, δ) of a real autopilot against its plan, plus cylinder separation of the plan boxes widened by
+that error, implies no loss of separation (`no_los_of_deviation`, checker `separatedDev`, ABI 3).
+
+**S31. MCAP for the log, Rerun for 3D, both optional at the edges.** MCAP is rosbag2's storage format,
+readable without ROS (and by Foxglove). The Rerun SDK is 175 MB, so it is not in the images: export runs
+anywhere `rerun-sdk` is installed, including natively on Windows.
+
+**S32. PX4's take-off ramp is a model parameter, not a bridge hack.** Lift-off comes ~3.9 s after the
+release time even when the vehicle is pre-armed (PX4 `MPC_TKO_RAMP_T` = 3 s plus spool-up), which uses
+most of the 5 s timing slack. `IntentParams.takeoff_s` (default 0, so milestone 4 is unchanged) holds
+the pad for that long; the twin calibrates it, and `--prior` starts a session from an earlier one's
+calibration.
+
+## Milestone 5: hub sequencing
+
+**S33. Under 30 m / 10 m, a compact hub is one runway.** Every pad of both mini_town hubs is within 30 m
+of every other (8 m spacing), so two simultaneous operations at a hub are a loss of separation unless
+they are 10 m apart vertically. The milestone does not relax the standard inside the terminal area;
+it sequences the hub, and measures what a spread layout (40 m pads) buys.
+
+**S34. Departures strategic, arrivals tactical.** A departure's pad climb is known at admission with a
+5 s slack, so the scheduler certifies it with the rest of the plan (and may pick another pad). An
+arrival's timing is known only near the end of a flight (slack 5 s + 2 s/min), so certifying it at
+admission would reserve the hub for minutes. Inbound flights end their strategic plan at an approach
+fix 100 m out on the inbound bearing and ask the hub sequencer for a landing slot ~20 s before it.
+
+**S35. Holding on a ring, descending outside the hub.** Holding points sit on the ring every 60 deg at
+25 m or 40 m. The ring radius must keep a holding box (20 m buffer) 30 m clear of every pad column (5 m
+buffer): farthest pad + 55 m, so 66 m for the compact hubs but 100 m for the spread layout, whose outer
+pads are 45 m out. A first run with a 70 m ring had a quarter of the spread layout's arrivals fail,
+because every descent on the ring conflicted with departures from the outer pads. All milestone-5 runs
+use 100 m, so every layout flies the same missions. Arrivals
+descend on the ring and cross to the pad at 25 m: a landing occupies the hub column for ~17 s instead of
+30-80 s from the cruise layers (descent is 1.5 m/s). Every candidate route is checked for building
+clearance.
+
+**S36. Terminal boxes use a 5 m lateral buffer.** The 20 m en-route buffer made a pad column 40 m wide,
+so no two pads (even 32 m apart) could ever operate together, and ring holding points 36 deg apart
+conflicted. PX4 tracked its plan within 3.5 m (p99) once calibrated (milestone 4.5), and Theorem 3 is
+what licenses sizing buffers from measured tracking error. Default unchanged (milestone 4 reproduces).
+
+**S37. Arrival priority over ground departures.** A drone on the ground waits for free; one in the air
+burns battery. If no landing slot needs at most 60 s of holding, departures not yet airborne (and not
+within 5 s of lift-off, and not emergencies) may be moved: the sequencer ignores their bookings, and the
+twin re-admits each displaced departure for a later slot.
+
+**S38. Never fly into the hub uncertified while there is battery to wait.** A flight with no slot at the
+fix holds there (outside the terminal area, registered so later plans avoid it) and retries every 5 s; it
+lands uncertified (`contingent`) only after 300 s in total. Early versions gave up after one search and
+flew the strategic approach into a busy hub, which caused most of the remaining terminal LoS.
+
+**S39. Theorem 4: the registry protocol keeps the fleet separated.** Withdraw, check against every other
+flight with `separatedHV`, register as certified only if all pass; force-register what must fly anyway;
+prune expired boxes. Proved in Lean that any sequence of these keeps every pair of certified boxes from
+different flights cylinder-separated, so with Theorem 2, two flights inside certified boxes are never in
+LoS. A first version of the model had no forced entries, which the Python registry has (uncertified
+emergencies, contingent landings); the model was extended rather than the claim left too strong. The Python implementation follows the protocol and
+is tested and audited, not extracted.

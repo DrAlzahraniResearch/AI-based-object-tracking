@@ -26,7 +26,7 @@ from dataclasses import asdict, dataclass
 import numpy as np
 
 from .intents import IntentParams, mission_intents, separated_hv_matrix
-from .missions import Mission, RoutingParams
+from .missions import Mission, RoutingParams, Waypoint, route_clear
 from .osm import Airspace
 from .vehicle import VehicleParams
 
@@ -39,6 +39,9 @@ class SchedulerParams:
     max_delay_s: float = 900.0
     max_layer_bump: int = 2               # extra same-direction layers per transit leg
     emergency_max_delay_s: float = 0.0
+    terminal: str = "exclude"             # exclude: terminal boxes are not certified (milestone 4);
+                                          # sequence: departure climbs are certified here (with pad choice),
+                                          # arrivals by the hub sequencer (swarm_sim/hubs.py)
 
 
 @dataclass
@@ -60,19 +63,36 @@ def _bumps(k: int):
 
 
 def variant(m: Mission, air: Airspace, rp: RoutingParams, delay: float, bump_out: int, bump_back: int):
-    """Copy of `m` delayed by `delay` s with transit layers raised; None if above the ceiling."""
+    """Copy of `m` delayed by `delay` s with transit layers raised; None if above the ceiling.
+    Outbound: the first climb and cruise waypoints. Return: from the last climb to the waypoint before landing
+    (cruise, or fix + approach)."""
     w = m.waypoints
-    if len(w) < 5 or w[0].tag != "climb" or w[-3].tag != "climb":
+    back = max((i for i, x in enumerate(w) if x.tag == "climb"), default=-1)
+    if len(w) < 5 or w[0].tag != "climb" or back < 2 or w[-1].tag != "land":
         return None if (bump_out or bump_back) else _shift(m, delay)
     dz_o, dz_b = 2 * rp.layer_step_m * bump_out, 2 * rp.layer_step_m * bump_back
-    if w[0].z + dz_o > air.ceiling_m or w[-3].z + dz_b > air.ceiling_m:
+    if w[0].z + dz_o > air.ceiling_m or w[back].z + dz_b > air.ceiling_m:
         return None
     v = _shift(m, delay)
     for i in (0, 1):
         v.waypoints[i].z += dz_o
-    for i in (-3, -2):
+    for i in range(back, len(w) - 1):
         v.waypoints[i].z += dz_b
     return v
+
+
+def with_pad(m: Mission, air: Airspace, rp: RoutingParams, pad: int):
+    """Copy of `m` departing from (and, until the hub sequencer says otherwise, returning to) pad `pad` of its
+    hub; None if the changed pad legs do not clear buildings."""
+    hub = next(h for h in air.hubs if h.name == m.hub)
+    px, py = hub.pad_positions()[pad]
+    v = copy.deepcopy(m)
+    v.pad = pad
+    v.meta = dict(v.meta) | {"start": [px, py, hub.elevation]}
+    for i, w in enumerate(v.waypoints):
+        if i == 0 or w.tag in ("approach", "land") or (w.tag == "cruise" and i == len(v.waypoints) - 2):
+            w.x, w.y = px, py
+    return v if route_clear(air, tuple(v.meta["start"]), v.waypoints, rp) else None
 
 
 def _shift(m: Mission, delay: float) -> Mission:
@@ -82,6 +102,12 @@ def _shift(m: Mission, delay: float) -> Mission:
 
 
 class FcfsScheduler:
+    """Strategic scheduler over a live registry of accepted en-route intent boxes.
+
+    `schedule(missions)` is the batch form (milestone 4): `admit` in request order. The digital twin
+    uses the incremental form: `admit` each request when it arrives, `withdraw` a flight's boxes when it
+    is replanned or lands, `replan` a non-conforming flight from its measured position, and `prune`
+    boxes that have expired."""
     name = "fcfs"
 
     def __init__(self, air: Airspace, vp: VehicleParams = VehicleParams(), ip: IntentParams = IntentParams(),
@@ -89,9 +115,20 @@ class FcfsScheduler:
         self.air, self.vp, self.ip, self.rp, self.p = air, vp, ip, rp, params
         self.checker = checker                 # runtime.utm_checker.VerifiedChecker or None
         self.h_mm, self.v_mm = int(round(params.h_sep_m * 1000)), int(round(params.v_sep_m * 1000))
+        self.acc = np.zeros((0, 8), np.int64)  # accepted en-route boxes (mm, ms)
+        self.owner = np.zeros(0, np.int64)     # flight key per accepted box
 
-    def _boxes(self, m: Mission) -> np.ndarray:
-        bx = [b.as_int() for b in mission_intents(m, self.vp, self.ip) if b.phase == "en_route"]
+    def certified(self, boxes: list, m: Mission) -> list[bool]:
+        """Which of a flight's boxes the scheduler certifies: en route always; with terminal sequencing also the
+        departure climb, and the arrival once the hub sequencer has sequenced it (meta['sequenced'])."""
+        if self.p.terminal != "sequence":
+            return [b.phase == "en_route" for b in boxes]
+        seq = bool(m.meta.get("sequenced"))
+        return [b.flow != "arr" or seq for b in boxes]
+
+    def _boxes(self, m: Mission, vp: VehicleParams | None = None) -> np.ndarray:
+        bl = mission_intents(m, vp or self.vp, self.ip)
+        bx = [b.as_int() for b, c in zip(bl, self.certified(bl, m)) if c]
         return np.array(bx, np.int64).reshape(-1, 8)
 
     def _conflicts(self, cand: np.ndarray, acc: np.ndarray) -> int:
@@ -105,55 +142,115 @@ class FcfsScheduler:
             return self.checker.count_against_hv(cand, acc, self.h_mm, self.v_mm)
         return int((~separated_hv_matrix(cand, acc, self.h_mm, self.v_mm)).sum())
 
+    # ------------------------------------------------------------------ registry
+    def register(self, key: int, boxes: np.ndarray):
+        if len(boxes):
+            self.acc = np.vstack([self.acc, boxes])
+            self.owner = np.concatenate([self.owner, np.full(len(boxes), key, np.int64)])
+
+    def withdraw(self, key: int):
+        keep = self.owner != key
+        self.acc, self.owner = self.acc[keep], self.owner[keep]
+
+    def prune(self, now_s: float):
+        keep = self.acc[:, 7] >= int(now_s * 1000)
+        self.acc, self.owner = self.acc[keep], self.owner[keep]
+
+    def conflicts_of(self, key: int, boxes: np.ndarray) -> int:
+        """Boxes of `key` that conflict with other flights' accepted boxes (online re-check)."""
+        return self._conflicts(boxes, self.acc[self.owner != key])
+
+    # ------------------------------------------------------------------ admission
+    def admit(self, m: Mission, key: int | None = None, now: float | None = None):
+        """Search the earliest certified plan for request `m` against the registry; register it.
+        Returns (variant or None, Decision, boxes). `now` (twin) delays the earliest departure to now."""
+        key = m.id if key is None else key
+        emergency = m.kind == "emergency"
+        max_d = self.p.emergency_max_delay_s if emergency else self.p.max_delay_s
+        n_steps = int(max_d // self.p.delay_step_s)
+        k0 = 0 if now is None or now <= m.release_t else int(np.ceil((now - m.release_t) / self.p.delay_step_s - 1e-9))
+        chosen, tried, first_ok = None, 0, None
+        bases = [m]
+        if self.p.terminal == "sequence":           # departure pad choice: own pad first, then the others
+            hub = next((h for h in self.air.hubs if h.name == m.hub), None)
+            if hub is not None:
+                bases += [b for b in (with_pad(m, self.air, self.rp, p) for p in range(hub.pads) if p != m.pad)
+                          if b is not None]
+        for k in range(k0, max(n_steps, k0) + 1):
+            d = k * self.p.delay_step_s
+            for (bo, bb), base in ((bb_, b_) for bb_ in _bumps(self.p.max_layer_bump) for b_ in bases):
+                v = variant(base, self.air, self.rp, d, bo, bb)
+                if v is None:
+                    continue
+                tried += 1
+                if first_ok is None:
+                    first_ok = (v, d, bo, bb)
+                cb = self._boxes(v)
+                if self._conflicts(cb, self.acc) == 0:
+                    chosen = (v, d, bo, bb, cb, "accepted")
+                    break
+            if chosen:
+                break
+        if chosen is None and emergency and first_ok is not None:
+            v, d, bo, bb = first_ok
+            chosen = (v, d, bo, bb, self._boxes(v), "accepted_uncertified")
+        if chosen is None:
+            return None, Decision(m.id, m.kind, m.release_t, None, None, 0, 0, "rejected", tried), None
+        v, d, bo, bb, cb, status = chosen
+        v.meta = dict(v.meta) | {"requested_t": m.release_t, "ground_delay_s": d, "layer_bump": [bo, bb],
+                                 "schedule_status": status, "original_id": m.id}
+        self.register(key, cb)
+        return v, Decision(m.id, m.kind, m.release_t, v.release_t, d, bo, bb, status, tried), cb
+
+    def replan(self, key: int, m: Mission, now: float, max_hover_s: float = 120.0, vp: VehicleParams | None = None):
+        """Re-certify an airborne flight from its measured position. `m` is the remaining route with
+        meta['start'] = current position; candidates hover there for 0, 10, ... `max_hover_s` s first.
+        The flight's old boxes are withdrawn. Returns (mission, status, hover_s, boxes); status is
+        'replanned' or, if nothing certifies, 'contingent' (flown anyway, boxes registered). `vp`: this
+        vehicle's own (measured) performance, if it differs from the fleet model."""
+        self.withdraw(key)
+        first = None
+        for k in range(int(max_hover_s // self.p.delay_step_s) + 1):
+            d = k * self.p.delay_step_s
+            v = copy.deepcopy(m)
+            v.release_t = now
+            x, y, z = v.meta["start"]
+            if d > 0:
+                v.waypoints = [Waypoint(x, y, z, d, "hover")] + v.waypoints
+            cb = self._boxes(v, vp)
+            if first is None:
+                first = (v, d, cb)
+            if self._conflicts(cb, self.acc) == 0:
+                self.register(key, cb)
+                return v, "replanned", d, cb
+        v, d, cb = first
+        self.register(key, cb)
+        return v, "contingent", 0.0, cb
+
+    # ------------------------------------------------------------------ batch (milestone 4)
     def schedule(self, missions: list[Mission]) -> tuple[list[Mission], dict]:
         t_wall = time.time()
-        acc = np.zeros((0, 8), np.int64)
         flown, decisions = [], []
         for m in sorted(missions, key=lambda x: (x.release_t, x.id)):
-            emergency = m.kind == "emergency"
-            max_d = self.p.emergency_max_delay_s if emergency else self.p.max_delay_s
-            n_steps = int(max_d // self.p.delay_step_s)
-            chosen, tried, first_ok = None, 0, None
-            for k in range(n_steps + 1):
-                d = k * self.p.delay_step_s
-                for bo, bb in _bumps(self.p.max_layer_bump):
-                    v = variant(m, self.air, self.rp, d, bo, bb)
-                    if v is None:
-                        continue
-                    tried += 1
-                    if first_ok is None:
-                        first_ok = (v, d, bo, bb)
-                    cb = self._boxes(v)
-                    if self._conflicts(cb, acc) == 0:
-                        chosen = (v, d, bo, bb, cb, "accepted")
-                        break
-                if chosen:
-                    break
-            if chosen is None and emergency and first_ok is not None:
-                v, d, bo, bb = first_ok
-                chosen = (v, d, bo, bb, self._boxes(v), "accepted_uncertified")
-            if chosen is None:
-                decisions.append(Decision(m.id, m.kind, m.release_t, None, None, 0, 0, "rejected", tried))
-                continue
-            v, d, bo, bb, cb, status = chosen
-            v.meta = dict(v.meta) | {"requested_t": m.release_t, "ground_delay_s": d, "layer_bump": [bo, bb],
-                                     "schedule_status": status, "original_id": m.id}
-            flown.append(v)
-            acc = np.vstack([acc, cb]) if len(cb) else acc
-            decisions.append(Decision(m.id, m.kind, m.release_t, v.release_t, d, bo, bb, status, tried))
+            v, dec, _ = self.admit(m)
+            decisions.append(dec)
+            if v is not None:
+                flown.append(v)
         flown.sort(key=lambda x: x.release_t)        # renumber: ids must equal list positions in the sim
         for i, v in enumerate(flown):
             v.id = i
+        return flown, self.report(decisions, len(missions), time.time() - t_wall)
+
+    def report(self, decisions: list, requests: int, wall_s: float) -> dict:
         stat = {s: sum(x.status == s for x in decisions) for s in ("accepted", "accepted_uncertified", "rejected")}
         delays = [x.ground_delay_s for x in decisions if x.ground_delay_s is not None]
-        report = {"scheduler": self.name, "params": asdict(self.p),
-                  "checker": "verified" if self.checker is not None else "python-reference",
-                  "requests": len(missions), **stat,
-                  "ground_delay_s": {"mean": round(float(np.mean(delays)), 2) if delays else None,
-                                     "p95": round(float(np.percentile(delays, 95)), 2) if delays else None,
-                                     "max": max(delays) if delays else None,
-                                     "delayed": int(sum(x > 0 for x in delays))},
-                  "layer_bumped": sum(1 for x in decisions if x.bump_out or x.bump_back),
-                  "wall_s": round(time.time() - t_wall, 2),
-                  "decisions": [asdict(x) for x in decisions]}
-        return flown, report
+        return {"scheduler": self.name, "params": asdict(self.p),
+                "checker": "verified" if self.checker is not None else "python-reference",
+                "requests": requests, **stat,
+                "ground_delay_s": {"mean": round(float(np.mean(delays)), 2) if delays else None,
+                                   "p95": round(float(np.percentile(delays, 95)), 2) if delays else None,
+                                   "max": max(delays) if delays else None,
+                                   "delayed": int(sum(x > 0 for x in delays))},
+                "layer_bumped": sum(1 for x in decisions if x.bump_out or x.bump_back),
+                "wall_s": round(wall_s, 2),
+                "decisions": [asdict(x) for x in decisions]}

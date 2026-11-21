@@ -48,8 +48,14 @@ configs/tier_a.yaml + hubs ─► missions ─► routes (cruise layers, clearan
 4. **Done:** strategic scheduler, first-come-first-served intent deconfliction with ground delay and
    layer changes, gated by Theorem 2 (steps 5–6); see the scheduler section below. Next: priority
    pre-emption for emergencies, and better-than-FCFS ordering.
-5. Hub pads: slot scheduling and holding patterns (step 7).
-6. Tier B: PX4 SITL + MAVSDK `MavsdkFleet`, small-scale replays of Tier A scenarios.
+4.5. **Done:** digital twin (`docs/twin.md`): plants behind one telemetry/command interface (Tier A with
+   model mismatch and faults, PX4 SITL via MAVSDK, replay), state estimation, online verified conformance,
+   replanning, calibration, prediction by Tier A rollouts, MCAP logs, Rerun viewer, Theorem 3, fidelity
+   report. Tier B (PX4 SIH, small scale) is pulled forward from milestone 6.
+5. **Done:** hub sequencing (step 7): approach fixes, strategic departures with pad choice, tactical landing
+   slots with ring holding, arrival priority over ground departures, compact vs spread hub layouts,
+   Theorem 4 (registry protocol); see the hub section below.
+6. Tier B at scale: PX4 SITL in Gazebo Jetty (sensors, rendering), larger fleets, Tier A scenario replays.
 7. Stress sweep ×1…×10 and centralized (global scheduler) vs decentralized (ORCA + local
    negotiation) comparison on identical seeds (steps 8–9).
 8. Optional: OpenUTM Flight Blender as the external USS, with the checker as a runtime monitor.
@@ -104,3 +110,27 @@ The intents were tightened so that strategic separation is affordable:
 The search uses a vectorised Python reference by default (`--verified-search` uses the Lean C
 checker; `tests/test_scheduler.py` checks both give identical decisions). The audit re-checks every
 accepted pair with the verified checker afterwards, so the search is not trusted.
+
+## Hub sequencing (milestone 5)
+
+Under 30 m / 10 m, every pad of a compact hub is within 30 m of every other, so the hub is one runway: two
+operations there are separated only by time or by 10 m of altitude. The terminal area is managed in two
+places, both certified with Theorem 2 against the same registry as en-route plans:
+
+```
+admission (strategic)                         ~20 s before the approach fix (tactical, HubSequencer)
+  en-route boxes + departure climb at a pad     hold time x holding point x landing pad, first certified:
+  (scheduler may pick any pad of the hub)        current pos -> ring point -> descend -> hold -> pad at 25 m -> land
+  route ends at an approach fix 100 m out       nothing within 60 s holding? move ground departures (arrival priority)
+  on the inbound bearing                        still nothing at the fix? hold on the ring (certified), retry every 5 s
+                                                after 300 s in total: land anyway (contingent, forced into the registry)
+```
+
+* **Ring.** Holding points every 60 deg at 100 m from the hub centre, at 25 m, 40 m, the inbound layer, or one
+  same-direction level above it. 100 m keeps a holding box (20 m buffer) 30 m clear of every pad column
+  (5 m buffer) even for the spread layout's outer pads, 45 m out.
+* **Terminal buffer 5 m** (`IntentParams.terminal_lateral_buffer_m`), from PX4's measured tracking (3.5 m p99).
+* **Layouts.** Compact: the mini_town hubs as built (8 m pads). Spread: 40 m pads (30 m + 2 x 5 m), so every pad
+  column is certifiable against every other and the hub works as several runways.
+* **Bookkeeping.** Each plan version records which of its boxes are certified (`cert`), so the twin audit checks
+  terminal operations too. A moved departure gets a second decision; reports count the last one.
