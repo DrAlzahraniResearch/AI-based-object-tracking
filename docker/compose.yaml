@@ -1,0 +1,53 @@
+# Civilian swarm traffic stack. Run from the repo root:
+#   docker compose -f docker/compose.yaml run --rm eval                     # pytest (Tier A, OSM, routing)
+#   docker compose -f docker/compose.yaml run --rm eval bash scripts/demo.sh   # OSM -> world -> Tier A run
+#   docker compose -f docker/compose.yaml run --rm proofs                   # Lean proofs + C library + FFI tests + audit
+#   docker compose -f docker/compose.yaml run --rm sim bash                 # ROS 2 Lyrical + Gazebo Jetty shell
+#
+# eval and sim are the images already verified on the MOT repo (same bases, same install script).
+name: civilian-swarm
+
+x-src: &src
+  volumes:
+    - ..:/work
+  working_dir: /work
+
+services:
+  eval:
+    <<: *src
+    build: {context: .., dockerfile: docker/eval.Dockerfile}
+    image: civilian-swarm/eval:latest
+
+  # libutm_checker.so links the toolchain's libleanshared.so (rpath into /root/.elan), so the FFI
+  # tests and the verified audit run in this container, not in eval.
+  proofs:
+    build: {context: .., dockerfile: docker/proofs.Dockerfile}
+    image: civilian-swarm/proofs:latest
+    working_dir: /work
+    volumes:
+      - ..:/work
+      - lake-cache:/work/proofs/.lake          # mathlib .olean files: keep off the Windows bind mount
+
+  sim:
+    <<: *src
+    build:
+      context: ..
+      dockerfile: docker/sim.Dockerfile
+      args: {WITH_ROS_GZ: "0"}
+    image: civilian-swarm/sim:latest
+    environment:
+      - GZ_PARTITION=swarm
+
+  sim-gpu:
+    extends: sim
+    profiles: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: all, capabilities: [gpu]}]
+
+volumes:
+  lake-cache:

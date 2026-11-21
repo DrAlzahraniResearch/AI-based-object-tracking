@@ -1,0 +1,4 @@
+# Landing hubs for the mini_town fixture, in local metres (x east, y north) or lat/lon.
+hubs:
+  - {name: west_depot, x: -230, y: -120, pads: 6}
+  - {name: east_depot, x: 255,  y: 255,  pads: 4}

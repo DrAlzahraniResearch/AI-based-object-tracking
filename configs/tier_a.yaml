@@ -1,0 +1,40 @@
+# Tier A run configuration. Thresholds marked ASSUMPTION are study choices; report them with results.
+seed: 1
+duration_s: 1800                 # demand window (missions released in [0, duration))
+demand_per_hour:                 # Poisson release rates
+  delivery: 60
+  emergency: 4
+  inspection: 8
+vehicle: {}                      # overrides of swarm_sim.vehicle.VehicleParams (PX4 x500 defaults)
+routing: {}                      # overrides of swarm_sim.missions.RoutingParams
+intent:                          # swarm_sim.intents.IntentParams
+  lateral_buffer_m: 20
+  slack_s: 5                     # time slack each side ...
+  slack_per_min: 2               # ... plus 2 s per minute since release
+  max_piece_m: 50
+  max_piece_z_m: 10
+  vertical_buffer_m: 2.5          # 15 m layer step = 10 m v_sep + 2 x 2.5 m: adjacent layers certifiable
+  terminal_radius_m: 40          # boxes within this radius of the pad are "terminal" (hub sequencing, step 7)
+sim:
+  dt: 0.1
+  log_hz: 2
+  h_sep_m: 30                    # ASSUMPTION: loss of separation if horizontal < 30 m ...
+  v_sep_m: 10                    # ... AND vertical < 10 m
+  terminal_radius_m: 40
+policy: none                     # none | orca  (or --policy on the command line)
+orca:                            # swarm_sim.orca.OrcaParams (h_sep_m, v_sep_m, terminal_radius_m default to sim's)
+  tau_s: 10
+  sense_m: 250
+  h_margin_m: 5
+  v_margin_m: 3                  # vertical gate 13 m: below the 15 m layer step, so adjacent layers are ignored
+  min_alt_m: 15
+  priority_share: 0.25           # emergency takes 25 % of the avoidance, the other flight 75 %
+  corridor_m: 15                 # max cross-track offset; intent lateral buffer is 20 m
+  corridor_gain: 0.5
+  stall_s: 10                    # right of way after 10 s blocked (see swarm_sim/orca.py)
+scheduler: none                  # none | fcfs  (or --scheduler on the command line)
+scheduler_params:                # swarm_sim.scheduler.SchedulerParams (h_sep_m / v_sep_m default to sim's)
+  delay_step_s: 10
+  max_delay_s: 900               # deliveries / inspections without a certified plan by then are rejected
+  max_layer_bump: 2              # up to 2 extra same-direction layers (+30 m each) per transit leg
+  emergency_max_delay_s: 0       # emergencies are never ground-delayed

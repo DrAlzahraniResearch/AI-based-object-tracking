@@ -1,0 +1,17 @@
+name = "utm_proofs"
+version = "0.1.0"
+defaultTargets = ["UtmChecker", "UtmProofs"]
+
+[[require]]
+name = "mathlib"
+git = "https://github.com/leanprover-community/mathlib4"
+rev = "v4.36.0"
+
+# Executable checker: Lean core only (no mathlib), so the compiled C library stays small.
+[[lean_lib]]
+name = "UtmChecker"
+defaultFacets = ["shared"]
+
+# Specifications over ℝ and proofs (mathlib). Never linked into the runtime library.
+[[lean_lib]]
+name = "UtmProofs"
