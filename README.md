@@ -14,7 +14,7 @@ emergency, inspection), with machine-checked separation guarantees.
 | 7. Shared landing hubs | done (milestones 5, 5.5) | `swarm_sim/hubs.py`: approach fixes, certified landing slots with ring holding, arrival priority; landing reservations at admission, emergency priority; compact vs spread layouts; Theorem 4 |
 | 8. Stress tests | ready | `run_tier_a.py --rate-scale` |
 | 9. Centralized vs decentralized | not started | both will be `SeparationPolicy` + scheduler variants on the same runs |
-| Gazebo + visualization (milestone 6) | in progress: one PX4 delivery flown and landed in Gazebo and recorded as video; GUI, live link and multi-vehicle runs not yet tried | PX4 x500s in the OSM world in Gazebo Harmonic (`--plant px4gz`), Gazebo viewer with headless video and a live link (`scripts/gz_view.py`), Foxglove export; `docs/visualization.md` |
+| Gazebo + visualization (milestone 6) | in progress: 3 PX4 x500s flown in Gazebo (conformance 1.0, verified audit consistent) and recorded as video; GUI and live link not yet tried | PX4 x500s in the OSM world in Gazebo Harmonic (`--plant px4gz`), Gazebo viewer with headless video and a live link (`scripts/gz_view.py`), Foxglove export; `docs/visualization.md` |
 | Digital twin (milestone 4.5) | done | `swarm_sim/twin/`: telemetry → state → verified conformance → replan / calibrate / predict, against Tier A, PX4 SITL or a replayed log; Theorem 3 (`docs/twin.md`) |
 
 ## Quick start (Docker Desktop, from the repo root)

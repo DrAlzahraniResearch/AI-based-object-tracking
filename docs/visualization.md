@@ -122,8 +122,11 @@ world started, vehicle models created and moved through the Python bindings); `R
 delivery spawned, flown under the twin and landed, about 5 minutes); `--record --camera follow:0` of that run
 gives a correct 59 s, 1280x720 video (589 frames: take-off from the pad, climb over the town, cruise, return,
 landing; conforming throughout). CPU rendering takes a few seconds per frame, so a recording takes several times
-the flight's length; it prints progress every 25 frames. Not yet tried: the GUI from a container, the live link,
-and runs with several x500s at once.
+the flight's length; it prints progress every 25 frames. Three x500s (`--missions 3`, two from the west depot
+at once, one from the east) flew their deliveries at real time with conformance 1.0, no alerts or replans, and
+the twin calibrated a 4.07 s lift-off lag (3.9 s with SIH); `audit_twin.py` with the verified checker is
+CONSISTENT (3 certified concurrent pairs confirmed, 3,330 PX4 position samples all inside their boxes, no loss of
+separation). Not yet tried: the GUI from a container and the live link.
 
 ## Limits
 
