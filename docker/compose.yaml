@@ -32,11 +32,14 @@ services:
       - ..:/work
       - lake-cache:/work/proofs/.lake          # mathlib .olean files: keep off the Windows bind mount
 
-  # Tier B: PX4 SITL (SIH) + MAVSDK + the verified checker. Builds FROM civilian-swarm/proofs, so build
-  # proofs first; run proofs once so runtime/build/libutm_checker.so exists for --verified.
+  # Tier B: PX4 SITL (SIH) + MAVSDK + the verified checker. Builds FROM the proofs service's image (compose builds
+  # proofs first); run proofs once so runtime/build/libutm_checker.so exists for --verified.
   px4:
     <<: *src
-    build: {context: .., dockerfile: docker/px4.Dockerfile}
+    build:
+      context: ..
+      dockerfile: docker/px4.Dockerfile
+      additional_contexts: {proofs: "service:proofs"}
     image: civilian-swarm/px4:latest
 
   sim:
@@ -68,10 +71,14 @@ services:
     environment:
       - GZ_PARTITION=swarm
 
-  # Tier B in Gazebo: PX4 SITL x500s in the OSM world. Build order: proofs, gz, then px4gz.
+  # Tier B in Gazebo: PX4 SITL x500s in the OSM world. Builds FROM gz and copies from proofs; compose builds those
+  # first (additional_contexts), so `build px4gz` alone is enough.
   px4gz:
     <<: *src
-    build: {context: .., dockerfile: docker/px4gz.Dockerfile}
+    build:
+      context: ..
+      dockerfile: docker/px4gz.Dockerfile
+      additional_contexts: {gz: "service:gz", proofs: "service:proofs"}
     image: civilian-swarm/px4gz:latest
     environment:
       - GZ_PARTITION=swarm

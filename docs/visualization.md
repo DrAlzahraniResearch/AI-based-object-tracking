@@ -59,7 +59,7 @@ python scripts/gz_view.py runs_twin/<run> --dump /tmp/frames.jsonl
 ## Tier B in Gazebo (`--plant px4gz`, `swarm_sim/twin/px4_gz.py`)
 
 ```bash
-docker compose -f docker/compose.yaml build proofs gz px4gz       # px4gz: FROM gz, and copies the Lean runtime from proofs
+docker compose -f docker/compose.yaml build px4gz                   # builds gz and proofs first, then PX4 + gz bridge
 docker compose -f docker/compose.yaml run --rm px4gz python3 scripts/run_twin.py --world data/worlds/mini_town \
   --plant px4gz --missions 3 --verified --tag gz1
 docker compose -f docker/compose.yaml run --rm px4gz python3 scripts/fidelity_report.py runs_twin/mini_town_px4gz_s1_x1_gz1
@@ -116,6 +116,11 @@ Opt-in, against real software: `RUN_GZ=1` (service `gz`) starts a world and chec
 docker compose -f docker/compose.yaml run --rm -e RUN_GZ=1 gz python3 -m pytest -q tests/test_viz.py
 docker compose -f docker/compose.yaml run --rm -e RUN_PX4GZ=1 px4gz python3 -m pytest -q tests/test_viz.py -k px4
 ```
+
+Verified so far (Docker Desktop on Windows, CPU only): all three images build; `RUN_GZ=1` passes (Harmonic
+world started, vehicle models created and moved through the Python bindings); `RUN_PX4GZ=1` passes (one x500
+delivery spawned, flown under the twin and landed, about 5 minutes). Not yet tried: recorded video
+(`--record`), the GUI from a container, the live link, and runs with several x500s at once.
 
 ## Limits
 

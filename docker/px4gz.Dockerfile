@@ -2,13 +2,14 @@
 # (Ubuntu 24.04 + Gazebo Harmonic). The verified checker's runtime (libleanshared.so) is copied from the proofs
 # image, which is also 24.04, so --verified works here as in the px4 image.
 #
-#   docker compose -f docker/compose.yaml build proofs gz px4gz    # px4gz builds FROM gz and copies from proofs
+#   docker compose -f docker/compose.yaml build px4gz              # builds gz and proofs first (compose build contexts)
 #   docker compose -f docker/compose.yaml run --rm proofs          # builds runtime/build/libutm_checker.so (once)
 #   docker compose -f docker/compose.yaml run --rm px4gz           # twin + 3 x500s in the OSM world (see CMD)
 #
 # The PX4 build takes 10-30 min the first time. Each x500 needs about one CPU core at real time.
-FROM civilian-swarm/proofs:latest AS proofs
-FROM civilian-swarm/gz:latest
+# `gz` and `proofs` are compose build contexts (docker/compose.yaml: additional_contexts), i.e. those services' images.
+FROM proofs AS lean
+FROM gz
 
 # The build and simulation subsets of PX4's Tools/setup/ubuntu.sh (no NuttX toolchain, no gz install: the base
 # image has gz-harmonic). OpenCV and GStreamer are for PX4's optical-flow and camera Gazebo plugins.
@@ -34,7 +35,7 @@ RUN pip install --no-cache-dir -r /opt/px4/Tools/setup/requirements.txt "empy==3
     && test -e /opt/px4/build/px4_sitl_default/bin/px4-gz_bridge      # the Gazebo bridge was built
 
 # Verified checker runtime (libutm_checker.so in /work/runtime/build has its rpath here).
-COPY --from=proofs /root/.elan/toolchains/leanprover--lean4---v4.36.0/lib/lean/libleanshared.so \
+COPY --from=lean /root/.elan/toolchains/leanprover--lean4---v4.36.0/lib/lean/libleanshared.so \
      /root/.elan/toolchains/leanprover--lean4---v4.36.0/lib/lean/libleanshared.so
 
 ENV PX4_ROOT=/opt/px4

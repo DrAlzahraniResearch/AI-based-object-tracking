@@ -14,7 +14,7 @@ emergency, inspection), with machine-checked separation guarantees.
 | 7. Shared landing hubs | done (milestones 5, 5.5) | `swarm_sim/hubs.py`: approach fixes, certified landing slots with ring holding, arrival priority; landing reservations at admission, emergency priority; compact vs spread layouts; Theorem 4 |
 | 8. Stress tests | ready | `run_tier_a.py --rate-scale` |
 | 9. Centralized vs decentralized | not started | both will be `SeparationPolicy` + scheduler variants on the same runs |
-| Gazebo + visualization (milestone 6) | built, Gazebo runs not yet verified | PX4 x500s in the OSM world in Gazebo Harmonic (`--plant px4gz`), Gazebo viewer with headless video and a live link (`scripts/gz_view.py`), Foxglove export; `docs/visualization.md` |
+| Gazebo + visualization (milestone 6) | in progress: one PX4 delivery flown and landed in Gazebo; viewer drives a real world; video, GUI, live link and multi-vehicle runs not yet tried | PX4 x500s in the OSM world in Gazebo Harmonic (`--plant px4gz`), Gazebo viewer with headless video and a live link (`scripts/gz_view.py`), Foxglove export; `docs/visualization.md` |
 | Digital twin (milestone 4.5) | done | `swarm_sim/twin/`: telemetry → state → verified conformance → replan / calibrate / predict, against Tier A, PX4 SITL or a replayed log; Theorem 3 (`docs/twin.md`) |
 
 ## Quick start (Docker Desktop, from the repo root)
@@ -35,7 +35,7 @@ SITL + MAVSDK built on the proofs image.
 Digital twin (milestone 4.5, `docs/twin.md`):
 
 ```bash
-docker compose -f docker/compose.yaml build proofs px4               # px4 builds FROM proofs; PX4 build ~10-25 min
+docker compose -f docker/compose.yaml build px4                      # builds proofs first; PX4 build ~10-25 min
 docker compose -f docker/compose.yaml run --rm eval bash scripts/twin_demo.sh   # Tier A plant matrix (~40 min)
 docker compose -f docker/compose.yaml run --rm proofs bash -c \
   "for r in runs_twin/mini_town_tier_a*; do python3 scripts/audit_twin.py \$r; done"
@@ -48,7 +48,7 @@ pip install rerun-sdk && python scripts/twin_view.py runs_twin/<run> && rerun ru
 Gazebo and visualization (milestone 6, `docs/visualization.md`):
 
 ```bash
-docker compose -f docker/compose.yaml build proofs gz px4gz          # Ubuntu 24.04 + Gazebo Harmonic; PX4 with its gz bridge
+docker compose -f docker/compose.yaml build px4gz                   # builds gz + proofs first; PX4 with its gz bridge
 docker compose -f docker/compose.yaml run --rm px4gz python3 scripts/run_twin.py --world data/worlds/mini_town \
   --plant px4gz --missions 3 --verified                              # PX4 x500s flying the OSM town in Gazebo
 docker compose -f docker/compose.yaml run --rm gz python3 scripts/gz_view.py runs_twin/<run> --launch \

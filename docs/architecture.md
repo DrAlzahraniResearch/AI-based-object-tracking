@@ -57,7 +57,7 @@ configs/tier_a.yaml + hubs ─► missions ─► routes (cruise layers, clearan
    Theorem 4 (registry protocol); see the hub section below.
 5.5. **Done:** landing reservations: the planned arrival certified at admission and kept when no better
    tactical slot exists, tactical plans from `now`, bounded emergency priority; `docs/results_milestone5_5.md`.
-6. **Built, Gazebo runs not yet verified:** Tier B in Gazebo, PX4 SITL x500s in the OSM world on Gazebo Harmonic
+6. **In progress** (one PX4 delivery flown and landed in Gazebo; the viewer drives a real Harmonic world): Tier B in Gazebo, PX4 SITL x500s in the OSM world on Gazebo Harmonic
    (`--plant px4gz`, Ubuntu 24.04 images `gz` and `px4gz`; Harmonic, not Jetty, because PX4 v1.16.2 requires it), with
    vehicles spawned at their pads and removed after landing; one scene model of a twin run drawn by Gazebo
    (`gz_view.py`: replay, live, headless video), Foxglove and Rerun (`docs/visualization.md`). Next: larger fleets,

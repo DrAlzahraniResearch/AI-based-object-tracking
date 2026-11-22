@@ -385,12 +385,18 @@ def test_gz_world_drives_vehicles(run_dir, tmp_path, tiny_air):
 @pytest.mark.skipif(os.environ.get("RUN_PX4GZ") != "1", reason="RUN_PX4GZ=1 and the px4gz image needed")
 def test_px4_gazebo_twin_flies(tmp_path):
     world = ROOT / "data/worlds/mini_town"
-    if not world.exists():
-        pytest.skip("mini_town world not built")
+    if not world.exists():                               # data/ is not in git: build the world from the test fixture
+        r = subprocess.run([sys.executable, str(ROOT / "scripts/osm_to_world.py"), "--osm",
+                            str(ROOT / "tests/fixtures/mini_town.osm"), "--name", "mini_town", "--hubs",
+                            str(ROOT / "configs/hubs_mini_town.yaml"), "--out", str(tmp_path / "worlds")],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr[-2000:]
+        world = tmp_path / "worlds/mini_town"
+    out = tmp_path / "runs"
     r = subprocess.run([sys.executable, str(ROOT / "scripts/run_twin.py"), "--world", str(world), "--plant", "px4gz",
-                        "--missions", "1", "--out", str(tmp_path)], capture_output=True, text=True, timeout=3600)
+                        "--missions", "1", "--out", str(out)], capture_output=True, text=True, timeout=3600)
     assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
-    rep = json.loads(next(tmp_path.glob("*/report.json")).read_text())
+    rep = json.loads(next(out.glob("*/report.json")).read_text())
     assert rep["plant_truth"]["simulator"] == "gazebo" and rep["plant_truth"]["completed"] == 1
 
 

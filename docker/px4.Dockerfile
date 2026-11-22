@@ -1,12 +1,13 @@
 # Tier B: PX4 SITL v1.16.2 with its built-in simulator (SIH: no Gazebo, headless) + MAVSDK, built on the
 # proofs image so the twin can use the Lean-verified checker (libleanshared.so is already there).
-#   docker compose -f docker/compose.yaml build proofs px4        # proofs first: px4 builds FROM it
+#   docker compose -f docker/compose.yaml build px4               # builds proofs first (compose build context)
 #   docker compose -f docker/compose.yaml run --rm proofs          # builds runtime/build/libutm_checker.so
 #   docker compose -f docker/compose.yaml run --rm px4             # twin + 2 PX4 vehicles (see CMD)
 #
 # The PX4 build takes 10-25 min the first time. One PX4 instance per vehicle; each needs ~1 CPU core at
 # speed factor 1, so on a 4-core laptop keep missions x speed <= ~3.
-FROM civilian-swarm/proofs:latest
+# `proofs` is a compose build context (docker/compose.yaml: additional_contexts): the proofs service's image.
+FROM proofs
 
 # The build subset of PX4's Tools/setup/ubuntu.sh (no simulators, no NuttX toolchain).
 RUN apt-get update && apt-get install -y --no-install-recommends \
