@@ -58,12 +58,12 @@ GUI_ARGS=()
 if [[ "$PLANT" == tier_a ]]; then
   # The viewer owns the world; the twin's Tier A plant needs none.
   echo "== viewer: starting Gazebo with $WORLD/world.sdf"
-  python3 scripts/gz_view.py "${VIEW_ARGS[@]}" --launch "${GUI_ARGS[@]}" > >(sed -u 's/^/[viewer] /') 2>&1 &
+  python3 -u scripts/gz_view.py "${VIEW_ARGS[@]}" --launch "${GUI_ARGS[@]}" > >(sed -u 's/^/[viewer] /') 2>&1 &
   VIEW_PID=$!
   for _ in $(seq 180); do [[ -f "$READY" ]] && break; sleep 1; done
   [[ -f "$READY" ]] || { echo "viewer did not come up (see /tmp/gz_view/gz_server.log)" >&2; exit 1; }
   echo "== twin: Tier A plant at ${PACE}x real time, publishing on /swarm/twin"
-  TWIN_CMD=(python3 scripts/run_twin.py --world "$WORLD" --gz-publish --pace "$PACE" --tag live "${TWIN_ARGS[@]}")
+  TWIN_CMD=(python3 -u scripts/run_twin.py --world "$WORLD" --gz-publish --pace "$PACE" --tag live "${TWIN_ARGS[@]}")
   if [[ "$DURATION" != 0 ]]; then
     echo "   (stopping the twin after ${DURATION} s of wall time, report kept; --duration 0 for the whole run)"
     timeout --signal=INT "$DURATION" "${TWIN_CMD[@]}" > >(sed -u 's/^/[twin] /') 2>&1 || true
@@ -74,10 +74,10 @@ else
   # The twin's PX4 plant owns the world (with the x500s); the viewer only adds markers to it.
   [[ $GUI == 1 ]] && TWIN_ARGS+=(--gz-gui)
   echo "== twin: PX4 x500s in Gazebo, publishing on /swarm/twin"
-  python3 scripts/run_twin.py --world "$WORLD" --plant px4gz --gz-publish --tag live "${TWIN_ARGS[@]}" \
+  python3 -u scripts/run_twin.py --world "$WORLD" --plant px4gz --gz-publish --tag live "${TWIN_ARGS[@]}" \
     > >(sed -u 's/^/[twin] /') 2>&1 &
   TWIN_PID=$!
-  python3 scripts/gz_view.py "${VIEW_ARGS[@]}" --no-vehicles > >(sed -u 's/^/[viewer] /') 2>&1 &
+  python3 -u scripts/gz_view.py "${VIEW_ARGS[@]}" --no-vehicles > >(sed -u 's/^/[viewer] /') 2>&1 &
   VIEW_PID=$!
   wait "$TWIN_PID" || true
   TWIN_PID=""

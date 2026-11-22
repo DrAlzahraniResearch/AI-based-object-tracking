@@ -96,6 +96,7 @@ def run_live(feed, scene, view, fps: float = 10.0, idle_exit_s: float | None = N
     without any message; otherwise runs until interrupted."""
     st = LiveStats()
     start = last_msg = last_status = clock()
+    last_line = None
     while True:
         msgs = feed.drain()
         now = clock()
@@ -117,7 +118,9 @@ def run_live(feed, scene, view, fps: float = 10.0, idle_exit_s: float | None = N
                     on_frame(f)
         if status_every_s and now - last_status >= status_every_s:
             last_status = now
-            echo(st.line())
+            if st.line() != last_line:                # nothing new while idle: stay quiet
+                last_line = st.line()
+                echo(last_line)
         if st.messages and idle_exit_s is not None and now - last_msg > idle_exit_s:
             st.exit_reason = f"no message for {idle_exit_s:g} s"
             return st

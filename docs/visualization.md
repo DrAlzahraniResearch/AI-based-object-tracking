@@ -140,7 +140,8 @@ the flight's length; it prints progress every 25 frames. Three x500s (`--mission
 at once, one from the east) flew their deliveries at real time with conformance 1.0, no alerts or replans, and
 the twin calibrated a 4.07 s lift-off lag (3.9 s with SIH); `audit_twin.py` with the verified checker is
 CONSISTENT (3 certified concurrent pairs confirmed, 3,330 PX4 position samples all inside their boxes, no loss of
-separation). Not yet tried: the GUI from a container and the live link.
+separation). `scripts/live_demo.sh` (Tier A at 4x, headless): the viewer received all 935 messages of 474 s of
+traffic (up to 4 drones, 18 intent boxes in force) and drew 377 frames. Not yet tried: the GUI from a container.
 
 ## Limits
 
