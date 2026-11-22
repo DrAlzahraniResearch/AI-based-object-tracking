@@ -143,9 +143,9 @@ CONSISTENT (3 certified concurrent pairs confirmed, 3,330 PX4 position samples a
 separation). `scripts/live_demo.sh` (Tier A at 4x, headless): the viewer received all 935 messages of 474 s of
 traffic (up to 4 drones, 18 intent boxes in force) and drew 377 frames. The same with `--gui` from the `gz-gui`
 service (PowerShell, WSLg paths set as in `docker/compose.yaml`): the Gazebo window opens on the Windows desktop
-with the town and the live overlays. That run showed two drawing faults, fixed since and not yet re-checked in the
-GUI: prediction lines grew into fans (Gazebo appends points when a line marker is modified; lines are now deleted
-and redrawn each frame) and overlapping intent boxes looked solid (opacity lowered to 10 % / 4 %).
+with the town and the live overlays. Its markers left copies every frame (trails of spheres, fans of prediction
+lines, intent boxes stacked into solid slabs): Gazebo reads marker id 0 as "assign a new id", and each group's
+first marker had id 0. Ids now start at 1; not yet re-checked in the GUI.
 
 On Windows, set the GUI variables in PowerShell, not MSYS2/Git Bash: those shells rewrite `/run/...` values
 into Windows paths (`C:\Program Files\Git\run/...`) and Docker cannot mount them.

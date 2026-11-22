@@ -200,10 +200,10 @@ def test_gz_view_marker_ids_are_reused_and_deleted(run_dir):
     view = GzView(rc, ViewOptions())
     view.apply(sc.frame(10.0))
     first = [m for m in rc.calls[-1][1] if m["ns"] == "intents"]
-    assert [m["id"] for m in first] == [0, 1, 2]
+    assert [m["id"] for m in first] == [1, 2, 3]
     view.apply(sc.frame(20.0))
     mk = [m for m in rc.calls[-1][1] if m["ns"] == "intents"]
-    assert [(m["id"], m.get("action", "add")) for m in mk] == [(0, "add"), (1, "add"), (2, "delete")]
+    assert [(m["id"], m.get("action", "add")) for m in mk] == [(1, "add"), (2, "add"), (3, "delete")]
     labels = [m for m in rc.calls[-1][1] if m["ns"] == "labels"]
     assert labels[0]["text"] == "0 !"
 
@@ -593,17 +593,16 @@ def test_live_demo_script_parses():
     assert r.returncode == 0, r.stderr
 
 
-def test_line_markers_are_redrawn_not_modified(run_dir):
-    """Gazebo appends points when a line marker is modified: each frame must delete a line before redrawing it."""
+def test_marker_ids_never_zero(run_dir):
+    """Gazebo treats marker id 0 as 'new marker', so id 0 would leave a copy every frame: ids go out from 1, and the
+    same markers keep the same ids from frame to frame."""
     run, worlds = run_dir
     sc = Scene.from_run(run, worlds)
     rc = RecordingClient()
     view = GzView(rc, ViewOptions())
     view.apply(sc.frame(10.0))
-    first = [m for m in rc.calls[-1][1] if m["ns"] == "predicted_path"]
-    assert [m.get("action", "add") for m in first] == ["add"]          # nothing to delete the first time
+    a = {(m["ns"], m["id"]) for m in rc.calls[-1][1]}
     view.apply(sc.frame(11.0))
-    again = [m for m in rc.calls[-1][1] if m["ns"] == "predicted_path"]
-    assert [m.get("action", "add") for m in again] == ["delete", "add"] and again[0]["id"] == again[1]["id"]
-    boxes = [m for m in rc.calls[-1][1] if m["ns"] == "intents"]
-    assert boxes and all(m.get("action", "add") == "add" for m in boxes)   # boxes are modified in place
+    b = {(m["ns"], m["id"]) for m in rc.calls[-1][1] if m.get("action") != "delete"}
+    assert min(i for _ns, i in a | b) == 1
+    assert a == b                                            # same set of markers: updated in place, none added
