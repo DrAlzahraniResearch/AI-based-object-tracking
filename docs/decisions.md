@@ -180,3 +180,43 @@ different flights cylinder-separated, so with Theorem 2, two flights inside cert
 LoS. A first version of the model had no forced entries, which the Python registry has (uncertified
 emergencies, contingent landings); the model was extended rather than the claim left too strong. The Python implementation follows the protocol and
 is tested and audited, not extracted.
+
+## Milestone 5.5: landing reservations
+
+**S40. Why arrivals went contingent: they were never promised a landing.** Instrumenting every failed final
+attempt at x2 (compact seed 1, spread seed 2) showed that none failed after holding: all 20 went contingent at
+their first attempt at the fix, with no landing slot and no free holding box anywhere on the ring. The
+blocking boxes were departures climbing out through the arrival's corridor and flights inbound on the same
+bearing, all certified at admission against a plan whose landing was not. Under S34 a departure is admitted
+against the airspace an arrival will need minutes later without knowing it, so by the time the arrival asks,
+the terminal area can be full. Holding stacks or longer leads would not fix that; the arrival has to be part of
+the strategic plan.
+
+**S41. Certify the planned arrival at admission as a reservation (`terminal="reserve"`).** The whole plan,
+approach fix to pad, is certified when the request is admitted, with the usual growing time slack; no flight
+is launched without a landing it can fly. The sequencer still looks for a tactical slot ~20 s before the fix
+(tighter windows, other pads and holding points). If none certifies, the flight keeps its reservation
+(`reserved`) instead of holding or landing uncertified. Reservation rows are marked in the registry so that
+an emergency can displace them; the displaced flight falls back to tactical sequencing (S34) and a new plan
+version records that its arrival is no longer certified. This reverses S34's choice for arrivals: at x2/x5 the
+cost in reserved hub time, which S34 expected, is real (below) and is the price of having no contingent
+arrivals. `terminal="sequence"` (milestone 5) is unchanged and reproduces bit for bit.
+
+**S42. Tactical plans start now.** A plan made from the measured position at time `now` only claims the
+airspace from `now`; its first box used to extend 5 s of slack into the past and "conflict" with flights that
+had already passed. With reservations, tactical boxes are clipped to start at `now`. The audit already checks
+each version only from its `valid_from`; versions are in force on `[valid_from, valid_to)`, and the audit now
+treats that interval as half-open (a flight that landed at t and one admitted at t were counted as concurrent
+at the single instant t).
+
+**S43. Emergency priority, bounded.** An emergency that cannot be certified as filed may move departures still
+on the ground (as arrivals may, S37), displace the landing reservations of airborne flights that have not yet
+started sequencing, and wait up to 30 s on the ground (`priority_max_delay_s`; emergencies otherwise never
+wait, S19). If that still certifies nothing it flies uncertified as before. The displacement is modelled in
+Theorem 4 as a removal (`drop`) followed by an ordinary checked admission, which is what the implementation's
+result equals.
+
+**S44. Rejected options.** Periodically re-certifying conforming flights from their measured state (tighter
+slack on the rest of the plan) added 2-8 % throughput at x5 in a one-seed trial and was dropped. Admitting
+without a reservation when none exists within the ground-delay limit (`reserve_fallback`) is kept as an
+option, not the default: it recovers throughput but brings back flights that can go contingent.

@@ -55,6 +55,8 @@ configs/tier_a.yaml + hubs ─► missions ─► routes (cruise layers, clearan
 5. **Done:** hub sequencing (step 7): approach fixes, strategic departures with pad choice, tactical landing
    slots with ring holding, arrival priority over ground departures, compact vs spread hub layouts,
    Theorem 4 (registry protocol); see the hub section below.
+5.5. **Done:** landing reservations: the planned arrival certified at admission and kept when no better
+   tactical slot exists, tactical plans from `now`, bounded emergency priority; `docs/results_milestone5_5.md`.
 6. Tier B at scale: PX4 SITL in Gazebo Jetty (sensors, rendering), larger fleets, Tier A scenario replays.
 7. Stress sweep ×1…×10 and centralized (global scheduler) vs decentralized (ORCA + local
    negotiation) comparison on identical seeds (steps 8–9).
@@ -134,3 +136,8 @@ admission (strategic)                         ~20 s before the approach fix (tac
   column is certifiable against every other and the hub works as several runways.
 * **Bookkeeping.** Each plan version records which of its boxes are certified (`cert`), so the twin audit checks
   terminal operations too. A moved departure gets a second decision; reports count the last one.
+* **Reservations (`terminal="reserve"`, milestone 5.5).** Admission also certifies the arrival (fix -> pad),
+  and the registry marks those rows (`arr`). At the fix the sequencer searches as above; if nothing certifies,
+  the flight keeps its reservation (`reserved`). Tactical boxes start at `now`. An emergency that does not
+  certify may move ground departures, displace reservations of flights not yet sequencing (they get an
+  `unreserved` plan version and sequence tactically), and wait up to 30 s.

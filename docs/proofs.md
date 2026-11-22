@@ -36,8 +36,9 @@ after the holding limit: registered without the check so that later plans avoid 
 certified boxes of different flights are `separatedHV`. `admit` registers a flight's candidate boxes as
 certified only if each is `separatedHV` from every registered box (certified or forced) of every other flight;
 `force` registers without the check; `withdraw` removes a flight; `prune` drops expired boxes. `inv_admit`,
-`inv_force`, `inv_withdraw`, `inv_prune`: each preserves `Inv`; `inv_steps`: so does any sequence of them from
-the empty registry; `registry_no_los` (with Theorem 2): two flights, each inside one of its certified
+`inv_force`, `inv_withdraw`, `inv_prune`: each preserves `Inv`; `drop f` (milestone 5.5: a displaced landing
+reservation, the rows an emergency's priority admission displaces) removes any subset of entries and
+preserves it by `inv_filter`; `inv_steps`: so does any sequence of them from the empty registry; `registry_no_los` (with Theorem 2): two flights, each inside one of its certified
 registered boxes at the same instant, are not in loss of separation. `separatedHV_comm` (symmetry) is the one
 lemma the proof needs. This is a model of the protocol that the scheduler (`admit`, `replan`) and the hub
 sequencer follow, not of their Python code, which is tested and audited instead.

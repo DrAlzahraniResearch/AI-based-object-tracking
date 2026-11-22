@@ -100,6 +100,7 @@ class DigitalTwin:
         self.calib = SpeedCalibrator(vp, cfg=vp_cfg)
         self.seq = sequencer                      # swarm_sim.hubs.HubSequencer (milestone 5) or None
         self.seq_retry: dict[int, float] = {}
+        self.priority: list[dict] = []                 # emergency admissions that moved / displaced others
         self.arrivals: list = []
         self.predictor = Predictor(air, sp, policy_factory, tp)
         self.log, self.echo = log, echo
@@ -179,6 +180,9 @@ class DigitalTwin:
             self.next_req += 1
             if self.tp.strategic:
                 v, dec, _ = self.sched.admit(m, key=m.id)
+                if (self.sched.p.terminal == "reserve" and m.kind == "emergency"
+                        and dec.status == "accepted_uncertified"):
+                    v, dec = self._admit_priority(m, now, v, dec)
             else:
                 v = copy.deepcopy(m)
                 v.meta = dict(v.meta) | {"schedule_status": "unscheduled"}
@@ -279,18 +283,61 @@ class DigitalTwin:
             self._emit("/twin/calibration", now, upd)
             self.echo(f"  t={now:7.1f}  calibration: {upd}")
 
+    def _bumpable(self, now):
+        """Ground departures an arrival (or an emergency) may move: not emergencies, not about to lift off."""
+        return frozenset(k for k, st in self.status.items()
+                         if st == "waiting" and k in self.routes and self.routes[k].kind != "emergency"
+                         and self.routes[k].release_t > now + 5.0)
+
+    def _soft(self, exclude):
+        """Airborne flights whose landing reservation an emergency may displace: not emergencies, not yet
+        sequencing (no landing slot requested)."""
+        if self.sched.p.terminal != "reserve":
+            return frozenset()
+        return frozenset(k for k in self.state.flying() if k in self.routes and k != exclude
+                         and self.routes[k].kind != "emergency" and k not in self.seq_retry
+                         and self.sched.reserved(self.routes[k]) and self._certified_now(k))
+
+    def _certified_now(self, vid) -> bool:
+        """The flight's plan in force is certified (all its boxes)."""
+        last = next((x for x in reversed(self.intent_versions) if x["vid"] == vid), None)
+        return last is not None and last["status"] in ("accepted", "replanned") and all(last["cert"])
+
+    def _unreserve(self, k, now):
+        """`k` lost its landing reservation to an emergency: the arrival part of its plan is no longer certified
+        (same boxes, new version); it sequences tactically at its fix."""
+        self.sched.unreserve(k)
+        self.routes[k].meta = dict(self.routes[k].meta) | {"unreserved": True}
+        last = next(x for x in reversed(self.intent_versions) if x["vid"] == k and x["valid_to"] is None)
+        last["valid_to"] = round(now, 3)
+        new = dict(last) | {"valid_from": round(now, 3), "valid_to": None, "reason": "unreserved",
+                            "cert": [c and f != "arr" for c, f in zip(last["cert"], last["flow"])],
+                            "mission": self.routes[k].to_json()}
+        self.intent_versions.append(new)
+        self._emit("/twin/unreserved", now, {"vid": k})
+
     def _sequence(self, vid, est, now, final=True):
         vvp = self._vehicle_vp(vid)
-        bumpable = frozenset(k for k, st in self.status.items()
-                             if st == "waiting" and k in self.routes and self.routes[k].kind != "emergency"
-                             and self.routes[k].release_t > now + 5.0)
-        res = self.seq.sequence(vid, self.routes[vid], est, now, vvp, final, bumpable)
+        route = self.routes[vid]
+        reserve = self.sched.p.terminal == "reserve"
+        reserved = reserve and self.sched.reserved(route) and self._certified_now(vid)
+        soft = self._soft(vid) if reserve and route.kind == "emergency" else frozenset()
+        n_dec = len(self.seq.decisions)
+        res = self.seq.sequence(vid, route, est, now, vvp, final, self._bumpable(now), soft, reserved)
         if res is None:
             self.seq_retry[vid] = now + self.seq.hp.retry_s
+            if len(self.seq.decisions) > n_dec and self.seq.decisions[-1].status == "reserved":
+                d = self.seq.decisions[-1]
+                rec = {"t": round(now, 2), "vid": vid, "hub": d.hub, "status": "reserved", "hold_s": 0.0,
+                       "pre_hold_s": 0.0, "slot": list(d.slot), "pad": d.pad, "candidates": d.candidates}
+                self.arrivals.append(rec)
+                self._emit("/twin/arrival", now, rec)
             return
         v, status, hold = res
         for k in self.seq.decisions[-1].bumped:
             self._readmit(k, now)
+        for k in self.seq.decisions[-1].unreserved:
+            self._unreserve(k, now)
         if status == "awaiting":
             self.seq_retry[vid] = now + self.seq.hp.await_retry_s
         self.routes[vid] = v
@@ -303,6 +350,29 @@ class DigitalTwin:
                "slot": list(d.slot), "pad": d.pad, "candidates": d.candidates}
         self.arrivals.append(rec)
         self._emit("/twin/arrival", now, rec)
+
+    def _admit_priority(self, m, now, v, dec):
+        """Emergency priority (reservations): an emergency that does not certify may move departures still on
+        the ground and displace the landing reservations of airborne flights that are not yet sequencing."""
+        ground, soft = self._bumpable(now), self._soft(m.id)
+        if not ground and not soft and self.sched.p.priority_max_delay_s <= self.sched.p.emergency_max_delay_s:
+            return v, dec
+        self.sched.withdraw(m.id)
+        moved = self.sched.displaceable(ground, soft)
+        acc_m, own_m = self.sched.acc[moved], self.sched.owner[moved]
+        v2, dec2, cb = self.sched.admit(m, key=m.id, ignore=moved,
+                                        max_delay_s=max(self.sched.p.emergency_max_delay_s, self.sched.p.priority_max_delay_s))
+        if dec2.status != "accepted":
+            return v2, dec2                  # same forced plan as before
+        hit = sorted(int(o) for o in set(own_m.tolist()) if self.sched._conflicts(cb, acc_m[own_m == o]) > 0)
+        for k in hit:
+            if k in ground:
+                self._readmit(k, now)
+            else:
+                self._unreserve(k, now)
+        self.priority.append({"t": round(now, 2), "vid": m.id, "moved": [k for k in hit if k in ground],
+                              "unreserved": [k for k in hit if k not in ground]})
+        return v2, dec2
 
     def _readmit(self, k, now):
         """A ground departure displaced by an arrival: admit its request again (later slot) and re-dispatch."""
@@ -450,7 +520,8 @@ class DigitalTwin:
                                               "median": round(float(np.median(list(self.liftoff.values()))), 2)
                                               if self.liftoff else None}},
             "legs": legs,
-            "hubs": self.seq.report() if self.seq is not None else None,
+            "hubs": (self.seq.report() | ({"emergency_priority": self.priority} if self.priority else {}))
+                    if self.seq is not None else None,
             "prediction": {"issued": len(self.predictions),
                            "position_error_m": {f"{h:g}s": {"n": len(v), "median": round(float(np.median(v)), 2),
                                                              "p95": round(float(np.percentile(v, 95)), 2)}

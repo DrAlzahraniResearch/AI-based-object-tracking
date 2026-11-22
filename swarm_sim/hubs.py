@@ -14,6 +14,13 @@ The traffic manager therefore controls the terminal area in two places:
   fresh, tight time windows) are cylinder-separated (Theorem 2) from every box in force, terminal boxes
   included. With nothing certified within `max_hold_s` the flight lands anyway (`contingent`, counted).
 
+Landing reservations (milestone 5.5, scheduler `terminal="reserve"`): the planned arrival is certified at
+admission, so no flight is launched without a landing it can fly. The sequencer still looks for a better slot
+before the fix, but if none certifies the flight keeps its reservation (`reserved`) instead of going
+contingent. Tactical plans start from the measured position now, so their boxes start at `now` (no time slack
+into the past: the audit, too, checks a plan only from the moment it is in force). An emergency may displace
+the reservations of flights that have not started sequencing yet; those fall back to tactical sequencing.
+
 The ring radius must keep a holding box (20 m buffer) 30 m clear of every pad column (5 m buffer): at least
 (farthest pad from the centre) + 55 m. The compact mini_town hubs need 66 m, the spread layout (40 m pad
 spacing) 100 m; milestone 5 uses 100 m everywhere so all layouts fly the same missions. Descending on the
@@ -57,7 +64,8 @@ class ArrivalDecision:
     vid: int
     hub: str
     t: float
-    status: str                          # sequenced | awaiting (holding at the fix, retrying) | contingent
+    status: str                          # sequenced | awaiting (holding at the fix, retrying) | reserved (kept its
+                                         # landing reservation) | contingent
     hold_s: float
     pre_hold_s: float
     slot: tuple                          # (ring offset deg, altitude offset m)
@@ -65,6 +73,7 @@ class ArrivalDecision:
     own_pad: int
     candidates: int
     bumped: tuple = ()
+    unreserved: tuple = ()               # flights whose landing reservation this (emergency) plan displaced
 
 
 class HubSequencer:
@@ -81,13 +90,14 @@ class HubSequencer:
         """Seconds to the approach fix for an unsequenced flight on its way there (0 if past it), else None."""
         if m.meta.get("sequenced"):
             return None
+        reserved = self.sched.reserved(m)
         if m.meta.get("awaiting"):
             return 0.0
         f = self.fix_index(m)
         if f is None or wp_idx < f:
             return None
         if wp_idx > f:
-            return 0.0
+            return None if reserved else 0.0
         w = m.waypoints[f]
         return math.hypot(w.x - pos[0], w.y - pos[1]) / max(math.hypot(vel[0], vel[1]), 1.0)
 
@@ -154,18 +164,29 @@ class HubSequencer:
             alts.append(fz + self.hp.stack_above_m)
         return build(alts), fz
 
+    def _cb(self, v: Mission, vp, now: float) -> np.ndarray:
+        """Certified boxes of a tactical plan. With reservations they start at `now` (the plan starts from the
+        measured position now; its validity, like the audit's check of it, begins there)."""
+        cb = self.sched._boxes(v, vp)
+        if self.sched.p.terminal == "reserve" and len(cb):
+            cb = cb.copy()
+            cb[:, 6] = np.maximum(cb[:, 6], int(math.floor(now * 1000)))
+            cb = cb[cb[:, 6] <= cb[:, 7]]
+        return cb
+
     def _holds(self, max_hold: float) -> list[float]:
         """0, 5, ... 60 s, then every 10 s up to max_hold."""
         st = self.hp.hold_step_s
         short = [k * st for k in range(int(min(max_hold, 60.0) // st) + 1)]
         return short + [float(h) for h in range(int(short[-1]) + 10, int(max_hold) + 1, 10)]
 
-    def _search(self, key, m, pos, now, vp, geoms, fz, pre, tried, max_hold=None, bumpable=frozenset()):
+    def _search(self, key, m, pos, now, vp, geoms, fz, pre, tried, max_hold=None, bumpable=frozenset(),
+                soft=frozenset()):
         acc, own = self.sched.acc, self.sched.owner
-        if bumpable:
-            keep = ~np.isin(own, list(bumpable))
-            acc_all, own_all = acc, own
-            acc = acc[keep]
+        if bumpable or soft:
+            moved = self.sched.displaceable(bumpable, soft)
+            acc_m, own_m = acc[moved], own[moved]
+            acc = acc[~moved]
         alive = list(geoms)
         max_hold = self.hp.max_hold_s if max_hold is None else max_hold
         for k, hold in enumerate(self._holds(max_hold)):
@@ -173,18 +194,22 @@ class HubSequencer:
             for g in alive:
                 (off, dz), slot, p = g
                 v = self._route(m, pos, now, slot, p, hold, fz, pre)
-                cb = self.sched._boxes(v, vp)
+                cb = self._cb(v, vp, now)
                 tried[0] += 1
                 if self.sched._conflicts(cb, acc) == 0:
-                    bumped = ()
-                    if bumpable:                 # the ground departures this plan actually displaces
-                        bumped = tuple(sorted(int(o) for o in set(own_all.tolist()) & set(bumpable)
-                                              if self.sched._conflicts(cb, acc_all[own_all == o]) > 0))
+                    bumped = unres = ()
+                    if bumpable or soft:         # the ground departures / reservations this plan actually displaces
+                        hit = sorted(int(o) for o in set(own_m.tolist())
+                                     if self.sched._conflicts(cb, acc_m[own_m == o]) > 0)
+                        bumped = tuple(o for o in hit if o in bumpable)
+                        unres = tuple(o for o in hit if o not in bumpable)
+                        for o in unres:
+                            self.sched.unreserve(o)
                     self.sched.register(key, cb)
                     waited = now - m.meta.get("await_since", now)
                     v.meta = dict(v.meta) | {"awaiting": False}
                     self.decisions.append(ArrivalDecision(key, m.hub, round(now, 2), "sequenced", hold + waited, pre,
-                                                          (off, dz), p, m.pad, tried[0], bumped))
+                                                          (off, dz), p, m.pad, tried[0], bumped, unres))
                     return v, "sequenced", hold + pre + waited
                 if k == 0 and self._prefix_blocked(m, pos, now, slot, p, vp, acc, fz, pre):
                     continue                     # the way to the hold point conflicts for every hold time
@@ -195,15 +220,17 @@ class HubSequencer:
         return None
 
     def sequence(self, key: int, m: Mission, pos, now: float, vp: VehicleParams | None = None, final: bool = True,
-                 bumpable: frozenset = frozenset()):
+                 bumpable: frozenset = frozenset(), soft: frozenset = frozenset(), reserved: bool = False):
         """Plan and certify the landing of flight `key` (route `m`, measured position `pos`). Returns
         (new route, status, delay s), with the flight's previous boxes replaced by the new ones, or None when
         nothing certifies and `final` is False (the previous plan stays registered; retry later).
         `bumpable`: ground departures that may be displaced (arrival priority) if no slot needs at most
-        `bump_after_s` of holding; the caller re-admits `decisions[-1].bumped`."""
+        `bump_after_s` of holding; the caller re-admits `decisions[-1].bumped`. `soft`: flights whose landing
+        reservations this flight may displace (emergency priority; the caller marks `decisions[-1].unreserved`).
+        `reserved`: the flight's current plan holds a certified landing reservation; if no slot certifies, it
+        keeps it (status `reserved`, the plan is unchanged) rather than holding or landing uncertified."""
         geoms, fz = self._geoms(m, pos, now)
-        own = self.sched.owner == key
-        saved = self.sched.acc[own].copy()
+        saved, saved_arr = self.sched.rows(key)
         self.sched.withdraw(key)
         tried = [0]
         waiting = bool(m.meta.get("awaiting"))
@@ -211,17 +238,20 @@ class HubSequencer:
         max_hold = max(0.0, self.hp.max_hold_s - waited)
         # early attempts: short holds only. Final (at the fix): long holds, moving ground departures, hovering
         # first. Already holding at the fix: long holds and moving departures.
-        passes = [(0.0, min(self.hp.bump_after_s, max_hold), frozenset())]
+        passes = [(0.0, min(self.hp.bump_after_s, max_hold), frozenset(), frozenset())]
         if final:
-            passes += [(0.0, max_hold, bumpable)]
-            if not waiting:
-                passes += [(pre, max_hold, bumpable) for pre in self.hp.pre_holds_s]
-        for pre, mh, bump in passes:
-            res = self._search(key, m, pos, now, vp, geoms, fz, pre, tried, mh, bump)
+            passes += [(0.0, max_hold, bumpable, soft)]
+            if not waiting and not reserved:
+                passes += [(pre, max_hold, bumpable, soft) for pre in self.hp.pre_holds_s]
+        for pre, mh, bump, sf in passes:
+            res = self._search(key, m, pos, now, vp, geoms, fz, pre, tried, mh, bump, sf)
             if res is not None:
                 return res
-        if not final:
-            self.sched.register(key, saved)
+        if not final or reserved:
+            self.sched.register(key, saved, saved_arr)
+            if final:
+                self.decisions.append(ArrivalDecision(key, m.hub, round(now, 2), "reserved", 0.0, 0.0, (0.0, 0.0),
+                                                      m.pad, m.pad, tried[0]))
             return None
         f = self.fix_index(m)
         w = m.waypoints[f]
@@ -231,7 +261,7 @@ class HubSequencer:
             # certified like any plan, and retry. The landing part stays uncertified until a slot is found.
             for (off, dz), slot, _p in {g[:2]: g for g in geoms}.values():
                 v = self._await_route(m, pos, now, slot, H, fz)
-                cb = self.sched._boxes(v, vp)
+                cb = self._cb(v, vp, now)
                 tried[0] += 1
                 if self.sched._conflicts(cb, self.sched.acc) == 0:
                     self.sched.register(key, cb)
@@ -241,7 +271,7 @@ class HubSequencer:
         # holding limit reached: land anyway, from the fix, on the planned pad
         v = self._route(m, pos, now, (w.x, w.y, w.z), m.pad, 0.0)
         v.meta = dict(v.meta) | {"awaiting": False}
-        self.sched.register(key, self.sched._boxes(v, vp))
+        self.sched.register(key, self._cb(v, vp, now))
         self.decisions.append(ArrivalDecision(key, m.hub, round(now, 2), "contingent", 0.0, 0.0, (0.0, 0.0), m.pad,
                                               m.pad, tried[0]))
         return v, "contingent", 0.0
@@ -253,11 +283,15 @@ class HubSequencer:
         v.waypoints = v.waypoints[:-2]
         if v.waypoints[-1].tag != "hover":
             v.waypoints[-1].hold_s = 0.0
-        cb = self.sched._boxes(v, vp)
+        cb = self._cb(v, vp, now)
         return len(cb) > 0 and self.sched._conflicts(cb, acc) > 0
 
     def report(self) -> dict:
-        d = [x for x in self.decisions if x.status != "awaiting"]      # one final decision per arrival
+        last = {}
+        for x in self.decisions:                                       # one final decision per arrival
+            if x.status != "awaiting":
+                last[x.vid] = x
+        d = sorted(last.values(), key=lambda x: (x.t, x.vid))
         holds = [x.hold_s + x.pre_hold_s for x in d if x.status == "sequenced"]
         by_hub = {}
         for x in d:
@@ -266,6 +300,8 @@ class HubSequencer:
         return {"arrivals": len(d), "sequenced": sum(x.status == "sequenced" for x in d),
                 "awaited": len({x.vid for x in self.decisions if x.status == "awaiting"}),
                 "contingent": sum(x.status == "contingent" for x in d),
+                "reserved": sum(x.status == "reserved" for x in d),
+                "reservations_displaced": sum(len(x.unreserved) for x in self.decisions),
                 "hold_s": {"mean": round(float(np.mean(holds)), 1) if holds else None,
                            "p95": round(float(np.percentile(holds, 95)), 1) if holds else None,
                            "max": max(holds) if holds else None,
@@ -275,3 +311,4 @@ class HubSequencer:
                 "pad_changes": sum(1 for x in d if x.status == "sequenced" and x.pad != x.own_pad),
                 "departures_moved": sum(len(x.bumped) for x in d),
                 "by_hub": by_hub, "candidates_mean": round(float(np.mean([x.candidates for x in d])), 1) if d else None}
+

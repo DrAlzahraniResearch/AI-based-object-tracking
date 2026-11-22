@@ -46,7 +46,10 @@ ap.add_argument("--admit-all", action="store_true",
 ap.add_argument("--missions", type=int, help="px4: number of vehicles/missions (overrides config)")
 ap.add_argument("--speed", type=float, help="px4: simulation speed factor (overrides config)")
 ap.add_argument("--verified", action="store_true", help="Lean-verified checker for conformance and scheduling")
-ap.add_argument("--hubs", choices=["off", "sequence"], help="hub sequencing (overrides configs/twin.yaml hubs.mode)")
+ap.add_argument("--hubs", choices=["off", "sequence", "reserve"],
+                help="hub sequencing; reserve: plus landing reservations at admission (overrides configs/twin.yaml hubs.mode)")
+ap.add_argument("--reserve-fallback", action="store_true",
+                help="hubs reserve: admit without a landing reservation instead of rejecting")
 ap.add_argument("--approach-fix", action="store_true", help="route inbound flights via approach fixes even with --hubs off")
 ap.add_argument("--pad-spacing", type=float, help="override every hub's pad spacing (m)")
 ap.add_argument("--prior", type=Path, help="report.json of an earlier twin run: start from its calibrated model")
@@ -66,7 +69,8 @@ if pad_spacing:
 vp = VehicleParams(**cfg.get("vehicle") or {})
 rp = RoutingParams(**cfg.get("routing") or {})
 ip = IntentParams(**cfg.get("intent") or {})
-if hub_mode == "sequence" or args.approach_fix:
+hub_seq = hub_mode in ("sequence", "reserve")
+if hub_seq or args.approach_fix:
     rp = replace(rp, approach_fix_m=float(hcfg.get("approach_fix_m", 70)))
     if hcfg.get("terminal_lateral_buffer_m") is not None:
         ip = replace(ip, terminal_lateral_buffer_m=float(hcfg["terminal_lateral_buffer_m"]))
@@ -98,10 +102,11 @@ if args.verified:
     from runtime.utm_checker import VerifiedChecker
     checker = VerifiedChecker()
 spar = SchedulerParams(**({"h_sep_m": sp.h_sep_m, "v_sep_m": sp.v_sep_m} | (cfg.get("scheduler_params") or {})
-                          | ({"terminal": "sequence"} if hub_mode == "sequence" else {})))
+                          | ({"terminal": hub_mode} if hub_seq else {})
+                          | ({"reserve_fallback": True} if args.reserve_fallback else {})))
 sched = FcfsScheduler(air, vp, ip, rp, spar, checker)
 sequencer = None
-if hub_mode == "sequence":
+if hub_seq:
     from swarm_sim.hubs import HubParams, HubSequencer
     sequencer = HubSequencer(sched, rp, HubParams(**{k: (tuple(v) if isinstance(v, list) else v)
                                                      for k, v in hcfg.items() if k in HubParams.__dataclass_fields__}))
@@ -142,7 +147,7 @@ else:
 mode = "-".join(x for x, on in (("open", args.no_replan and args.no_calibrate), ("noreplan", args.no_replan and not args.no_calibrate),
                                   ("nocal", args.no_calibrate and not args.no_replan), ("admitall", args.admit_all),
                                   (args.policy, args.policy != "orca"), ("hubseq", hub_mode == "sequence"),
-                                  ("fix", args.approach_fix and hub_mode != "sequence"),
+                                  ("hubres", hub_mode == "reserve"), ("fb", args.reserve_fallback), ("fix", args.approach_fix and not hub_seq),
                                   (f"pads{pad_spacing:g}" if pad_spacing else "", bool(pad_spacing))) if on)
 name = (f"{air.name}_{plant_name}{('-' + mode) if mode else ''}_s{seed}_x{args.rate_scale:g}"
         f"{('_' + args.tag) if args.tag else ''}")

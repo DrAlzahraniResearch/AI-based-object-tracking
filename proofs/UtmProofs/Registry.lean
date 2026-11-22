@@ -12,9 +12,16 @@ This file proves that the discipline keeps the registry invariant: any two certi
 flights are cylinder-separated, whatever was forced in between. With Theorem 2 (`checker_no_los`), two
 flights both inside registered boxes at the same instant are therefore never in loss of separation.
 
+Milestone 5.5 adds removals of part of a flight's entries: a landing reservation displaced by an emergency
+(`unreserve`), and the displaced rows of an emergency's priority admission. The implementation checks the
+emergency against the registry without the displaceable rows, then removes the rows of every displaceable
+flight it conflicts with; the result is the same as removing those rows first (`drop`) and then admitting
+through the full check, which is how the model states it. Any removal preserves the invariant (`inv_filter`).
+A flight that keeps its reservation after a failed slot search leaves the registry as it was.
+
 This is a model of the registry protocol, not of the Python code that implements it (`FcfsScheduler.admit`,
-`replan`, `HubSequencer.sequence`, `register` / `withdraw` / `prune`); that code follows the protocol and is
-tested, and every run is audited afterwards with the verified checker.
+`replan`, `HubSequencer.sequence`, `register` / `withdraw` / `unreserve` / `prune`); that code follows the
+protocol and is tested, and every run is audited afterwards with the verified checker.
 -/
 
 namespace Utm
@@ -104,18 +111,21 @@ theorem inv_admit {h v : Int} {r r' : Registry} {k : Nat} {cand : List Box}
       exact absurd rfl hne
   · cases ha
 
-/-- Any sequence of the four operations, from the empty registry. -/
+/-- Any sequence of the operations, from the empty registry. `drop f` removes the entries `f` rejects
+(a displaced landing reservation, displaced rows before a priority admission). -/
 inductive Op where
   | admit (k : Nat) (cand : List Box)
   | force (k : Nat) (cand : List Box)
   | withdraw (k : Nat)
   | prune (t : Int)
+  | drop (f : Entry → Bool)
 
 def step (h v : Int) (r : Registry) : Op → Registry
   | .admit k c => (admit h v k c r).getD r
   | .force k c => force k c r
   | .withdraw k => withdraw k r
   | .prune t => prune t r
+  | .drop f => r.filter f
 
 theorem inv_steps (h v : Int) (ops : List Op) : Inv h v (ops.foldl (step h v) []) := by
   suffices ∀ r, Inv h v r → Inv h v (ops.foldl (step h v) r) from this [] (inv_nil h v)
@@ -133,6 +143,7 @@ theorem inv_steps (h v : Int) (ops : List Op) : Inv h v (ops.foldl (step h v) []
     | force k c => exact inv_force k c hr
     | withdraw k => exact inv_withdraw k hr
     | prune t => exact inv_prune t hr
+    | drop f => exact inv_filter f hr
 
 /-- **Fleet safety.** Two flights, each inside one of its certified registered boxes at the same instant,
 are not in loss of separation (Theorem 4 + Theorem 2). -/

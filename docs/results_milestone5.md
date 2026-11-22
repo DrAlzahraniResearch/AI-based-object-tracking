@@ -50,6 +50,8 @@ Figure: `docs/figures/milestone5_hubs.png`.
   emergencies; most of the rest are inbound streams that share an approach fix, where any plan for the
   leading flight (holding included) blocks the flight behind it. That is the next thing to fix (holding
   stacks per bearing, or sequencing the stream as a whole).
+  *Milestone 5.5 found the actual cause (arrivals were never promised a landing) and fixed it with landing
+  reservations: `docs/results_milestone5_5.md`.*
 * **Model mismatch.** On the mismatched plant the twin's calibration and replanning still hold
   conformance at 0.9995-0.9998; terminal LoS is 44 against 29 on the matched plant, all involving contingent
   or uncertified flights.

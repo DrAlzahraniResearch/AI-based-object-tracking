@@ -12,6 +12,11 @@ accepted and its boxes join the accepted set.
 * A delivery or inspection with no certified plan within `max_delay_s` is rejected (not flown).
 * Terminal boxes (take-off / landing columns at the pad) are excluded: hub sequencing is plan
   step 7.
+* `terminal="sequence"`: departure climbs are certified here; arrivals by the hub sequencer only.
+  `terminal="reserve"` (milestone 5.5): the planned arrival (approach fix -> pad) is certified at
+  admission too, as a landing *reservation* (a flight is not launched without one); the hub sequencer
+  replaces it tactically. Reservation rows are marked in the registry (`arr`) so an emergency may
+  displace them (the owner then falls back to tactical sequencing).
 
 The search uses a vectorised Python reference (`separated_hv_matrix`) or, if given, the
 Lean-verified C checker. Either way `scripts/audit_run.py` re-checks every accepted pair with the
@@ -39,9 +44,14 @@ class SchedulerParams:
     max_delay_s: float = 900.0
     max_layer_bump: int = 2               # extra same-direction layers per transit leg
     emergency_max_delay_s: float = 0.0
+    priority_max_delay_s: float = 0.0     # reserve: an emergency that moves others may also wait this long on the ground
+    reserve_fallback: bool = False        # reserve: no plan with a landing reservation within max_delay_s -> admit
+                                          # without one (tactical sequencing only) instead of rejecting
     terminal: str = "exclude"             # exclude: terminal boxes are not certified (milestone 4);
                                           # sequence: departure climbs are certified here (with pad choice),
                                           # arrivals by the hub sequencer (swarm_sim/hubs.py)
+                                          # reserve: as sequence, and the planned arrival is certified at
+                                          # admission as a landing reservation (milestone 5.5)
 
 
 @dataclass
@@ -117,14 +127,32 @@ class FcfsScheduler:
         self.h_mm, self.v_mm = int(round(params.h_sep_m * 1000)), int(round(params.v_sep_m * 1000))
         self.acc = np.zeros((0, 8), np.int64)  # accepted en-route boxes (mm, ms)
         self.owner = np.zeros(0, np.int64)     # flight key per accepted box
+        self.arr = np.zeros(0, bool)           # row is a landing reservation (terminal="reserve")
+
+    @property
+    def hub_terminal(self) -> bool:
+        return self.p.terminal in ("sequence", "reserve")
+
+    def reserved(self, m: Mission) -> bool:
+        """The flight's planned arrival is a certified reservation (not yet replaced by a sequenced plan)."""
+        return (self.p.terminal == "reserve" and not m.meta.get("sequenced") and not m.meta.get("awaiting")
+                and not m.meta.get("unreserved"))
 
     def certified(self, boxes: list, m: Mission) -> list[bool]:
         """Which of a flight's boxes the scheduler certifies: en route always; with terminal sequencing also the
-        departure climb, and the arrival once the hub sequencer has sequenced it (meta['sequenced'])."""
-        if self.p.terminal != "sequence":
+        departure climb, and the arrival once the hub sequencer has sequenced it (meta['sequenced']), or, with
+        reservations, from admission until it is displaced or replaced by a holding plan."""
+        if not self.hub_terminal:
             return [b.phase == "en_route" for b in boxes]
-        seq = bool(m.meta.get("sequenced"))
-        return [b.flow != "arr" or seq for b in boxes]
+        ok = bool(m.meta.get("sequenced")) or self.reserved(m)
+        return [b.flow != "arr" or ok for b in boxes]
+
+    def _boxes_arr(self, m: Mission, vp: VehicleParams | None = None):
+        """Certified boxes and which of them are a landing reservation."""
+        bl = mission_intents(m, vp or self.vp, self.ip)
+        res = self.reserved(m)
+        sel = [(b.as_int(), res and b.flow == "arr") for b, c in zip(bl, self.certified(bl, m)) if c]
+        return (np.array([x for x, _ in sel], np.int64).reshape(-1, 8), np.array([a for _, a in sel], bool))
 
     def _boxes(self, m: Mission, vp: VehicleParams | None = None) -> np.ndarray:
         bl = mission_intents(m, vp or self.vp, self.ip)
@@ -143,35 +171,55 @@ class FcfsScheduler:
         return int((~separated_hv_matrix(cand, acc, self.h_mm, self.v_mm)).sum())
 
     # ------------------------------------------------------------------ registry
-    def register(self, key: int, boxes: np.ndarray):
+    def register(self, key: int, boxes: np.ndarray, arr: np.ndarray | None = None):
         if len(boxes):
             self.acc = np.vstack([self.acc, boxes])
             self.owner = np.concatenate([self.owner, np.full(len(boxes), key, np.int64)])
+            self.arr = np.concatenate([self.arr, np.zeros(len(boxes), bool) if arr is None else np.asarray(arr, bool)])
+
+    def _keep(self, keep: np.ndarray):
+        self.acc, self.owner, self.arr = self.acc[keep], self.owner[keep], self.arr[keep]
 
     def withdraw(self, key: int):
-        keep = self.owner != key
-        self.acc, self.owner = self.acc[keep], self.owner[keep]
+        self._keep(self.owner != key)
+
+    def unreserve(self, key: int):
+        """Drop the landing reservation of `key` (its other boxes stay)."""
+        self._keep(~((self.owner == key) & self.arr))
+
+    def rows(self, key: int):
+        sel = self.owner == key
+        return self.acc[sel].copy(), self.arr[sel].copy()
+
+    def displaceable(self, ground=frozenset(), soft=frozenset()) -> np.ndarray:
+        """Rows that a priority flight may displace: all boxes of `ground` (departures not yet airborne, which
+        are then admitted again) and the reservation rows of `soft` (which then sequence tactically)."""
+        return np.isin(self.owner, list(ground)) | (np.isin(self.owner, list(soft)) & self.arr)
 
     def prune(self, now_s: float):
-        keep = self.acc[:, 7] >= int(now_s * 1000)
-        self.acc, self.owner = self.acc[keep], self.owner[keep]
+        self._keep(self.acc[:, 7] >= int(now_s * 1000))
 
     def conflicts_of(self, key: int, boxes: np.ndarray) -> int:
         """Boxes of `key` that conflict with other flights' accepted boxes (online re-check)."""
         return self._conflicts(boxes, self.acc[self.owner != key])
 
     # ------------------------------------------------------------------ admission
-    def admit(self, m: Mission, key: int | None = None, now: float | None = None):
+    def admit(self, m: Mission, key: int | None = None, now: float | None = None, ignore: np.ndarray | None = None,
+              max_delay_s: float | None = None):
         """Search the earliest certified plan for request `m` against the registry; register it.
-        Returns (variant or None, Decision, boxes). `now` (twin) delays the earliest departure to now."""
+        Returns (variant or None, Decision, boxes). `now` (twin) delays the earliest departure to now.
+        `ignore`: registry rows left out of the search (emergency priority; the caller moves their owners)."""
+        acc = self.acc if ignore is None else self.acc[~ignore]
         key = m.id if key is None else key
         emergency = m.kind == "emergency"
         max_d = self.p.emergency_max_delay_s if emergency else self.p.max_delay_s
+        if max_delay_s is not None:
+            max_d = max_delay_s
         n_steps = int(max_d // self.p.delay_step_s)
         k0 = 0 if now is None or now <= m.release_t else int(np.ceil((now - m.release_t) / self.p.delay_step_s - 1e-9))
         chosen, tried, first_ok = None, 0, None
         bases = [m]
-        if self.p.terminal == "sequence":           # departure pad choice: own pad first, then the others
+        if self.hub_terminal:                       # departure pad choice: own pad first, then the others
             hub = next((h for h in self.air.hubs if h.name == m.hub), None)
             if hub is not None:
                 bases += [b for b in (with_pad(m, self.air, self.rp, p) for p in range(hub.pads) if p != m.pad)
@@ -186,7 +234,7 @@ class FcfsScheduler:
                 if first_ok is None:
                     first_ok = (v, d, bo, bb)
                 cb = self._boxes(v)
-                if self._conflicts(cb, self.acc) == 0:
+                if self._conflicts(cb, acc) == 0:
                     chosen = (v, d, bo, bb, cb, "accepted")
                     break
             if chosen:
@@ -194,12 +242,21 @@ class FcfsScheduler:
         if chosen is None and emergency and first_ok is not None:
             v, d, bo, bb = first_ok
             chosen = (v, d, bo, bb, self._boxes(v), "accepted_uncertified")
+        if (chosen is None and self.p.terminal == "reserve" and self.p.reserve_fallback and not emergency
+                and not m.meta.get("unreserved")):
+            m2 = copy.deepcopy(m)
+            m2.meta = dict(m2.meta) | {"unreserved": True}
+            return self.admit(m2, key, now, ignore, max_delay_s)
         if chosen is None:
             return None, Decision(m.id, m.kind, m.release_t, None, None, 0, 0, "rejected", tried), None
         v, d, bo, bb, cb, status = chosen
         v.meta = dict(v.meta) | {"requested_t": m.release_t, "ground_delay_s": d, "layer_bump": [bo, bb],
                                  "schedule_status": status, "original_id": m.id}
-        self.register(key, cb)
+        if self.p.terminal == "reserve":
+            cb, arr = self._boxes_arr(v)
+            self.register(key, cb, arr if status == "accepted" else None)
+        else:
+            self.register(key, cb)
         return v, Decision(m.id, m.kind, m.release_t, v.release_t, d, bo, bb, status, tried), cb
 
     def replan(self, key: int, m: Mission, now: float, max_hover_s: float = 120.0, vp: VehicleParams | None = None):
@@ -217,11 +274,11 @@ class FcfsScheduler:
             x, y, z = v.meta["start"]
             if d > 0:
                 v.waypoints = [Waypoint(x, y, z, d, "hover")] + v.waypoints
-            cb = self._boxes(v, vp)
+            cb, arr = self._boxes_arr(v, vp)
             if first is None:
                 first = (v, d, cb)
             if self._conflicts(cb, self.acc) == 0:
-                self.register(key, cb)
+                self.register(key, cb, arr)
                 return v, "replanned", d, cb
         v, d, cb = first
         self.register(key, cb)

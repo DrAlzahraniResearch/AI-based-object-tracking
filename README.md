@@ -11,7 +11,7 @@ emergency, inspection), with machine-checked separation guarantees.
 | 4. Autonomous separation | done (milestone 3) | `swarm_sim/orca.py`: decentralized ORCA with corridor, priority and right-of-way rules |
 | 5. Traffic scheduling | done (milestone 4) | `swarm_sim/scheduler.py`: FCFS strategic deconfliction (ground delay + layer changes) |
 | 6. Detect / avoid conflicts | done | strategic: scheduler gated by Theorem 2; tactical: ORCA; verified audit (`scripts/audit_run.py`) |
-| 7. Shared landing hubs | done (milestone 5) | `swarm_sim/hubs.py`: approach fixes, certified landing slots with ring holding, arrival priority; compact vs spread layouts; Theorem 4 |
+| 7. Shared landing hubs | done (milestones 5, 5.5) | `swarm_sim/hubs.py`: approach fixes, certified landing slots with ring holding, arrival priority; landing reservations at admission, emergency priority; compact vs spread layouts; Theorem 4 |
 | 8. Stress tests | ready | `run_tier_a.py --rate-scale` |
 | 9. Centralized vs decentralized | not started | both will be `SeparationPolicy` + scheduler variants on the same runs |
 | Digital twin (milestone 4.5) | done | `swarm_sim/twin/`: telemetry → state → verified conformance → replan / calibrate / predict, against Tier A, PX4 SITL or a replayed log; Theorem 3 (`docs/twin.md`) |
@@ -47,10 +47,13 @@ pip install rerun-sdk && python scripts/twin_view.py runs_twin/<run> && rerun ru
 Hub sequencing (milestone 5):
 
 ```bash
-docker compose -f docker/compose.yaml run --rm eval bash scripts/hubs_demo.sh         # 30 runs, ~1-2 h
+docker compose -f docker/compose.yaml run --rm eval bash scripts/hubs_demo.sh         # 63 runs, ~2-3 h
 docker compose -f docker/compose.yaml run --rm proofs bash -c \
-  "for r in runs_twin/mini_town_tier_a*fix_* runs_twin/mini_town_tier_a*hubseq*; do python3 scripts/audit_twin.py \$r > /dev/null && echo ok \$r; done"
+  "for r in runs_twin/mini_town_tier_a*fix_* runs_twin/mini_town_tier_a*hub{seq,res}*; do python3 scripts/audit_twin.py \$r > /dev/null && echo ok \$r; done"
 ```
+
+`--hubs sequence` is milestone 5 (tactical landing slots only); `--hubs reserve` adds landing reservations at
+admission (milestone 5.5), `--reserve-fallback` admits without one instead of rejecting.
 
 ## Results: hub sequencing (milestone 5, mini_town, seeds 1–3)
 
@@ -69,6 +72,14 @@ Same missions in every configuration; 30 m / 10 m separation everywhere, the hub
 * Under 30 m / 10 m a compact hub (pads 8 m apart) is one runway and caps throughput; 40 m pad spacing
   restores it (×2: everything flies, 6 s mean holding).
 * **Theorem 4**: the registry protocol keeps every pair of certified flights separated.
+
+**Milestone 5.5, landing reservations** (`docs/results_milestone5_5.md`). Contingent arrivals all came from
+the same cause: a flight was launched without a landing it could fly, and departures certified in the meantime
+filled the terminal area. Certifying the planned arrival at admission as a reservation, kept when no better
+tactical slot exists, cuts contingent arrivals from 23 / 26 to 1 / 4 at ×2 (compact / spread) and from 40 / 64
+to 5 / 6 at ×5. Every remaining case traces to an emergency. Terminal LoS falls from 29 / 10 to 2 / 1 at ×2.
+The cost is capacity. With spread hubs at ×2 it is ground delay (201 of 205 flown, mean 289 s). With compact
+hubs it is throughput (×2: 144 of 205 flown, against 178). All 33 reservation runs pass the verified audit.
 
 ## Results: digital twin (milestone 4.5, mini_town, seeds 1–3)
 

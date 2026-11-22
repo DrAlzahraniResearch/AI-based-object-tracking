@@ -34,7 +34,7 @@ sys.path.insert(0, str(ROOT))
 from runtime.utm_checker import VerifiedChecker  # noqa: E402
 from swarm_sim.intents import inside_ref, separated_hv_matrix  # noqa: E402
 
-CERTIFIED = {"accepted", "replanned", "sequenced", "awaiting"}
+CERTIFIED = {"accepted", "replanned", "sequenced", "awaiting"}   # "reserved" keeps the "accepted" version
 
 ap = argparse.ArgumentParser()
 ap.add_argument("run", type=Path)
@@ -45,8 +45,14 @@ args = ap.parse_args()
 chk = VerifiedChecker()
 H, V = int(round(args.h * 1000)), int(round(args.v * 1000))
 vers = json.loads((args.run / "intents.json").read_text())["versions"]
+prev = {}
 for k, x in enumerate(vers):
     x["k"] = k
+    # a version that only withdraws part of a certification (a landing reservation displaced by an emergency,
+    # milestone 5.5) makes no new claim: its claim dates from the version it replaces
+    p = prev.get(x["vid"])
+    x["claim"] = p["claim"] if (x.get("reason") == "unreserved" and p is not None) else (x["valid_from"], k)
+    prev[x["vid"]] = x
     cert = x.get("cert") or [ph == "en_route" for ph in x["phase"]]       # 4.5 logs: en-route boxes certified
     x["cert_mask"] = cert
     x["enr"] = np.array([b for b, c in zip(x["int"], cert) if c], np.int64).reshape(-1, 8)
@@ -72,10 +78,10 @@ for x, y in itertools.combinations(vers, 2):
     if x["vid"] == y["vid"]:
         continue
     lo, hi = max(x["valid_from"], y["valid_from"]), min(x["valid_to"], y["valid_to"])
-    if lo > hi:
-        continue
+    if lo >= hi:            # versions are in force on [valid_from, valid_to): a flight that landed at t and one
+        continue            # admitted at t are never in force together
     A, B = clip(x["enr"], lo, hi), clip(y["enr"], lo, hi)
-    later = y if (y["valid_from"], y["k"]) > (x["valid_from"], x["k"]) else x
+    later = y if y["claim"] > x["claim"] else x
     if len(A) == 0 or len(B) == 0:
         ok = True
     else:

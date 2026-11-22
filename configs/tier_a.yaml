@@ -38,3 +38,4 @@ scheduler_params:                # swarm_sim.scheduler.SchedulerParams (h_sep_m 
   max_delay_s: 900               # deliveries / inspections without a certified plan by then are rejected
   max_layer_bump: 2              # up to 2 extra same-direction layers (+30 m each) per transit leg
   emergency_max_delay_s: 0       # emergencies are never ground-delayed
+  priority_max_delay_s: 30        # hubs reserve: an emergency that would fly uncertified may move others and wait <= 30 s
