@@ -128,6 +128,15 @@ class Px4GzPlant(Px4Plant):
             self.spawned.pop(k, None)
             self.removed.append(k)
 
+    def advance(self) -> bool:
+        """As Px4Plant, but not finished while a landed vehicle is still being removed: otherwise the run ends and
+        the world shuts down under the removal."""
+        alive = super().advance()
+        if not alive:
+            with self.lock:
+                return bool(self.spawned)
+        return True
+
     def close(self):
         try:
             self.loop.call_soon_threadsafe(self.loop.stop)

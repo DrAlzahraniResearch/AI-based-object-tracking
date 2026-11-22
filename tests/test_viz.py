@@ -467,3 +467,7 @@ def test_px4gz_lifecycle_shares_pads(tiny_air):
     assert abs(spawn1 - 53) <= 1                          # waited for vehicle 0 to climb away (50 s + 3 s), not 15 s
     assert sorted(k for _t, e, k in events if e == "despawn") == [0, 1]
     assert all(k != 2 for _t, _e, k in events)
+    plant.t_end = 0.0
+    assert not plant.spawned and plant.advance() is False       # finished only once every vehicle is removed
+    plant.spawned[5] = (0.0, 0.0, 0.0)
+    assert plant.advance() is True
