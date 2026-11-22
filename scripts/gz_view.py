@@ -151,6 +151,11 @@ try:
                 if not recorder.capture():
                     print(f"WARNING: no camera image at t={t:.1f}; stopping")
                     break
+                done = k + 1
+                if done % 25 == 0 or done == len(times):
+                    el = time.monotonic() - wall0
+                    print(f"  recorded {done}/{len(times)} frames (t={t:.0f} s), {el / done:.1f} s per frame, "
+                          f"about {el / done * (len(times) - done) / 60:.0f} min to go", flush=True)
             elif dump is None:
                 lag = wall0 + k / args.fps - time.monotonic()
                 if lag > 0:
