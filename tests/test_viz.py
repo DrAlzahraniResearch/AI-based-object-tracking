@@ -471,3 +471,123 @@ def test_px4gz_lifecycle_shares_pads(tiny_air):
     assert not plant.spawned and plant.advance() is False       # finished only once every vehicle is removed
     plant.spawned[5] = (0.0, 0.0, 0.0)
     assert plant.advance() is True
+
+
+# ------------------------------------------------------------------ live link: loop, pacing, marker fallback
+class _Clock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+    def sleep(self, dt):
+        self.t += dt
+
+
+def test_run_live_draws_and_exits_when_idle(run_dir, tiny_air):
+    """The whole live path minus gz-transport: tap -> JSON -> feed -> Scene -> GzView, with a fake clock."""
+    from swarm_sim.gz.live import run_live
+    from swarm_sim.twin.log import read_log
+    run, worlds = run_dir
+    versions = json.loads((run / "intents.json").read_text())["versions"]
+
+    class FakeTwin:
+        intent_versions = versions
+    wire = []
+    tap = GzLiveTap(wire.append, FakeTwin())
+    for topic, t, msg in read_log(run / "twin_log.mcap"):
+        tap(topic, t, msg)
+
+    clock = _Clock()
+
+    class Feed:                                    # delivers the wire in 3 bursts, 1 s apart, then nothing
+        def __init__(self):
+            self.chunks = [wire[: len(wire) // 3], wire[len(wire) // 3: 2 * len(wire) // 3], wire[2 * len(wire) // 3:]]
+            self.next_t = 1.0
+
+        def drain(self):
+            if self.chunks and clock.t >= self.next_t:
+                self.next_t += 1.0
+                return [decode(d) for d in self.chunks.pop(0)]
+            return []
+    rc = RecordingClient()
+    lines, frames = [], []
+    st = run_live(Feed(), Scene(tiny_air), GzView(rc, ViewOptions()), fps=10, idle_exit_s=5, first_wait_s=60,
+                  status_every_s=2, on_frame=frames.append, echo=lines.append, clock=clock, sleep=clock.sleep)
+    assert st.messages == len(wire) and st.frames == 3 and st.sim_t == 20.0
+    # frames are drawn at each burst's latest state (~6, 13, 20 s): 2 boxes in force at most (3 only in 8..12 s)
+    assert st.max_vehicles == 2 and st.max_intents == 2 and st.max_nonconforming == 1
+    assert st.exit_reason == "no message for 5 s" and 8.0 <= clock.t <= 8.3
+    assert lines and lines[0].startswith("live t=")
+    assert any(c[0] == "create" and c[1] == "veh_0_ok" for c in rc.calls)
+    assert sum(len(f.events) for f in frames) == 2          # the alert and the replan, each once
+
+
+def test_run_live_gives_up_without_messages():
+    from swarm_sim.gz.live import run_live
+    clock = _Clock()
+
+    class Empty:
+        def drain(self):
+            return []
+    st = run_live(Empty(), Scene(), GzView(RecordingClient()), fps=10, idle_exit_s=5, first_wait_s=3,
+                  status_every_s=0, echo=lambda *_: None, clock=clock, sleep=clock.sleep)
+    assert st.messages == 0 and st.exit_reason == "no message within 3 s"
+
+
+def test_view_markers_back_off_without_gui(run_dir):
+    run, worlds = run_dir
+    sc = Scene.from_run(run, worlds)
+    clock = _Clock()
+
+    class NoGui(RecordingClient):
+        gui = False
+
+        def markers(self, markers):
+            super().markers(markers)
+            return self.gui
+    rc = NoGui()
+    view = GzView(rc, ViewOptions(), clock=clock)
+    view.apply(sc.frame(2.0))
+    view.apply(sc.frame(3.0))
+    assert sum(c[0] == "markers" for c in rc.calls) == 1        # failed once, then skipped
+    rc.gui = True
+    clock.t = GzView.MARKER_RETRY_S + 1
+    view.apply(sc.frame(4.0))
+    assert sum(c[0] == "markers" for c in rc.calls) == 2 and view.marker_ids
+
+
+def test_view_no_vehicles_draws_markers_only(run_dir):
+    run, worlds = run_dir
+    rc = RecordingClient()
+    GzView(rc, ViewOptions(vehicles=False)).apply(Scene.from_run(run, worlds).frame(10.0))
+    assert [c[0] for c in rc.calls] == ["markers"] and not rc.alive
+
+
+def test_paced_plant_holds_sim_to_pace():
+    from swarm_sim.twin.telemetry import PacedPlant
+    clock = _Clock()
+
+    class Fast:
+        name = "fast"
+
+        def __init__(self):
+            self.t = 0.0
+
+        def now(self):
+            return self.t
+
+        def advance(self):
+            self.t += 0.1
+            return self.t < 100
+    p = PacedPlant(Fast(), pace=4, sleep=clock.sleep, clock=clock)
+    while p.advance():
+        pass
+    assert p.name == "fast" and p.now() == pytest.approx(100.0, abs=0.2)
+    assert clock.t == pytest.approx((p.now() - 0.1) / 4, abs=1e-6)     # 100 sim s at 4x = 25 wall s
+
+
+def test_live_demo_script_parses():
+    r = subprocess.run(["bash", "-n", str(ROOT / "scripts/live_demo.sh")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr

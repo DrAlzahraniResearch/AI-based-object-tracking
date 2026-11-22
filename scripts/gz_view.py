@@ -5,8 +5,10 @@
     # headless MP4 (paused world, stepped once per frame; works with CPU rendering)
     python scripts/gz_view.py runs_twin/<run> --launch --record runs_twin/<run>/gazebo.mp4 --camera overview
     python scripts/gz_view.py runs_twin/<run> --launch --record follow3.mp4 --camera follow:3 --start 120 --end 300
-    # live: run the twin with --gz-publish in another shell (same GZ_PARTITION)
+    # live: run the twin with --gz-publish in another shell (same GZ_PARTITION); scripts/live_demo.sh does both
     python scripts/gz_view.py --live --world data/worlds/mini_town --launch --gui
+    # live, overlays only, into a world that already has the vehicles (run_twin.py --plant px4gz --gz-gui)
+    python scripts/gz_view.py --live --world data/worlds/mini_town --no-vehicles
     # no Gazebo at all: write what would be sent (models, poses, markers) as JSON Lines
     python scripts/gz_view.py runs_twin/<run> --dump /tmp/frames.jsonl
 
@@ -49,6 +51,12 @@ ap.add_argument("--no-labels", action="store_true")
 ap.add_argument("--certified-only", action="store_true", help="draw certified intent boxes only")
 ap.add_argument("--dump", type=Path, help="no Gazebo: write the calls as JSON Lines")
 ap.add_argument("--quiet", action="store_true", help="do not print events")
+ap.add_argument("--no-vehicles", action="store_true",
+                help="draw markers only: the world already has the vehicles (PX4 x500s from --plant px4gz)")
+ap.add_argument("--exit-after-idle", type=float, help="live: exit this many seconds after the twin's last message")
+ap.add_argument("--first-wait", type=float, help="live: give up (exit code 2) if no message arrives in this many s")
+ap.add_argument("--status-every", type=float, default=10.0, help="live: seconds between status lines (0: none)")
+ap.add_argument("--ready-file", type=Path, help="live: create this file once subscribed (for scripts)")
 args = ap.parse_args()
 if not args.live and args.run is None:
     ap.error("give a run directory or --live")
@@ -56,6 +64,8 @@ if args.live and args.world is None:
     ap.error("--live needs --world")
 if args.record and args.live:
     ap.error("--record replays a finished run (record live runs afterwards from their directory)")
+if args.dump and args.live:
+    ap.error("--dump replays a finished run")
 
 # ------------------------------------------------------------------ scene and world
 if args.live:
@@ -68,7 +78,8 @@ else:
     world_path = (args.world or args.world_dir / air.name) / "world.sdf"
 every = args.every or args.rate / args.fps
 opt = ViewOptions(scale=args.scale, intents=not args.no_intents, truth=not args.no_truth,
-                  predictions=not args.no_predictions, labels=not args.no_labels, certified_only=args.certified_only)
+                  predictions=not args.no_predictions, labels=not args.no_labels, certified_only=args.certified_only,
+                  vehicles=not args.no_vehicles)
 
 procs = []
 gz = None
@@ -115,28 +126,23 @@ def show_events(frame):
     if args.quiet:
         return
     for e in frame.events:
-        print(f"  t={e.t:7.1f}  {'!' if e.warn else ' '} {e.text}")
+        print(f"  t={e.t:7.1f}  {'!' if e.warn else ' '} {e.text}", flush=True)
 
 
 dump = open(args.dump, "w") if args.dump else None
 n = 0
+exit_code = 0
 try:
     if args.live:
-        from swarm_sim.gz.live import GzLiveFeed
+        from swarm_sim.gz.live import GzLiveFeed, run_live
         feed = GzLiveFeed(gz)
-        print("waiting for the twin on /swarm/twin (run_twin.py --gz-publish) ...")
-        latest = None
-        while True:
-            for topic, t, msg in feed.drain():
-                scene.feed(topic, t, msg)
-                if topic == "/twin/state":
-                    latest = t if latest is None else max(latest, t)
-            if latest is not None:
-                f = scene.frame(latest)
-                view.apply(f)
-                show_events(f)
-                n += 1
-            time.sleep(1.0 / args.fps)
+        if args.ready_file:
+            args.ready_file.write_text("subscribed\n")
+        print("waiting for the twin on /swarm/twin (run_twin.py --gz-publish) ...", flush=True)
+        st = run_live(feed, scene, view, args.fps, args.exit_after_idle, args.first_wait, args.status_every,
+                      on_frame=show_events, echo=lambda line: print(line, flush=True))
+        print(f"{st.line()}; stopped: {st.exit_reason}", flush=True)
+        exit_code = 0 if st.messages else 2
     else:
         times = scene.times(every, args.start, args.end)
         print(f"replaying {args.run.name}: {len(times)} frames, t = {times[0]:.0f}..{times[-1]:.0f} s"
@@ -177,3 +183,4 @@ finally:
     if procs:
         from swarm_sim.gz import launch
         launch.stop(procs)
+sys.exit(exit_code)

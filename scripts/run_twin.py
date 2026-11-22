@@ -49,6 +49,8 @@ ap.add_argument("--speed", type=float, help="px4, px4gz: simulation speed factor
 ap.add_argument("--gz-gui", action="store_true", help="px4gz: also open the Gazebo GUI")
 ap.add_argument("--gz-publish", action="store_true",
                 help="publish the twin live on the gz topic /swarm/twin (scripts/gz_view.py --live)")
+ap.add_argument("--pace", type=float,
+                help="tier_a, replay: hold the plant to this many sim seconds per wall second (for --gz-publish)")
 ap.add_argument("--verified", action="store_true", help="Lean-verified checker for conformance and scheduling")
 ap.add_argument("--hubs", choices=["off", "sequence", "reserve"],
                 help="hub sequencing; reserve: plus landing reservations at admission (overrides configs/twin.yaml hubs.mode)")
@@ -168,7 +170,13 @@ out.mkdir(parents=True, exist_ok=True)
 log = TwinLog(out / "twin_log")
 print(f"twin: plant={plant_name} requests={len(requests)} checker={'verified' if checker else 'python-reference'}"
       f" -> {out}")
-twin = DigitalTwin(air, plant, requests, sched, vp, ip, sp, policy_factory, tp, checker, log, sequencer=sequencer,
+twin_plant = plant
+if args.pace:
+    if args.plant in ("px4", "px4gz"):
+        ap.error("--pace is for tier_a and replay; PX4 plants run at their own speed factor (--speed)")
+    from swarm_sim.twin.telemetry import PacedPlant
+    twin_plant = PacedPlant(plant, args.pace)
+twin = DigitalTwin(air, twin_plant, requests, sched, vp, ip, sp, policy_factory, tp, checker, log, sequencer=sequencer,
                    vp_cfg=vp_cfg)
 if args.gz_publish:
     from swarm_sim.gz.live import TOPIC, GzLiveTap
@@ -178,6 +186,13 @@ if args.gz_publish:
     print(f"publishing the twin on gz topic {TOPIC} (scripts/gz_view.py --live --world {args.world})")
 try:
     rep = twin.run(max_t)
+except KeyboardInterrupt:                      # Ctrl+C, or `timeout --signal=INT` (scripts/live_demo.sh)
+    print(f"interrupted at t={plant.now():.1f} s: writing what the twin has so far")
+    for v in twin.intent_versions:
+        if v["valid_to"] is None:
+            v["valid_to"] = round(plant.now(), 3)
+    rep = twin.report()
+    rep["interrupted_at_s"] = round(plant.now(), 1)
 finally:
     log.close()
     if args.plant in ("px4", "px4gz"):

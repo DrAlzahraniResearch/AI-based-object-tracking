@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import math
+import time
 from collections import deque
 from dataclasses import dataclass, field, replace
 
@@ -139,6 +140,29 @@ class TierAPlant(Plant):
 
     def truth(self):
         return {"pos": self.sim.fleet.pos.copy(), "on": self.sim.fleet.on.copy(), "t": self.now()}
+
+
+class PacedPlant:
+    """Holds a fast plant (Tier A, replay) to `pace` x real time, so a live viewer can follow it.
+
+    A proxy: every attribute but `advance` is the wrapped plant's, so the twin cannot tell the difference."""
+
+    def __init__(self, plant: Plant, pace: float, sleep=time.sleep, clock=time.monotonic):
+        self.plant, self.pace, self._sleep, self._clock = plant, float(pace), sleep, clock
+        self._w0 = self._t0 = None
+
+    def __getattr__(self, name):
+        return getattr(self.plant, name)
+
+    def advance(self) -> bool:
+        alive = self.plant.advance()
+        t = self.plant.now()
+        if self._w0 is None:
+            self._w0, self._t0 = self._clock(), t
+        ahead = (t - self._t0) / self.pace - (self._clock() - self._w0)
+        if ahead > 0:
+            self._sleep(ahead)
+        return alive
 
 
 class ReplayPlant(Plant):

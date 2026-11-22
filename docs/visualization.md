@@ -50,9 +50,23 @@ python scripts/gz_view.py runs_twin/<run> --dump /tmp/frames.jsonl
   Use Rerun or Foxglove for the boxes.
 * **Live:** `run_twin.py ... --gz-publish` publishes every logged message, and each plan version as it is made
   or withdrawn, as JSON on the gz topic `/swarm/twin`; `gz_view.py --live --world data/worlds/<name>` draws it.
-  Both must share `GZ_PARTITION` (the images set `swarm`) and should run in one container (`docker compose
-  exec`), since gz-transport discovery does not cross container networks by default. The link is one-way:
-  the twin still never reads the simulator (decision S22).
+  Both must share `GZ_PARTITION` (the images set `swarm`) and should run in one container, since gz-transport
+  discovery does not cross container networks by default. The link is one-way: the twin still never reads the
+  simulator (decision S22). `scripts/live_demo.sh` runs both in one container:
+
+  ```bash
+  # Tier A twin held to 4x real time (--pace), headless: status lines, a summary, exit code 0 if the link works
+  docker compose -f docker/compose.yaml run --rm px4gz bash scripts/live_demo.sh
+  # the same in the Gazebo GUI
+  docker compose -f docker/compose.yaml --profile gui run --rm gz-gui bash scripts/live_demo.sh --gui
+  # PX4 x500s in Gazebo: the twin owns the world, the viewer adds only markers (--no-vehicles)
+  docker compose -f docker/compose.yaml run --rm px4gz bash scripts/live_demo.sh --plant px4gz --missions 3
+  ```
+
+  With Tier A the twin is stopped after `--duration` wall seconds (default 120; `0` for the whole run) and still
+  writes its report. Live frames are drawn at each new `/twin/state` (1 Hz of sim time; `twin.log_state_hz` in
+  `configs/twin.yaml` for smoother motion). Without a GUI, markers fail; the viewer then skips them for 30 s at a
+  time instead of waiting for each request's timeout.
 * Needs the gz-transport Python bindings (`python3-gz-transport13 python3-gz-msgs10` on Harmonic; Ionic and
   Jetty module names are tried too), except with `--dump`.
 

@@ -13,6 +13,7 @@ headless camera. Markers reuse ids frame to frame; ids no longer in use are dele
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -26,6 +27,7 @@ PARK_Z = -200.0
 @dataclass
 class ViewOptions:
     scale: float = 4.0            # vehicle marker size, x a 0.5 m quadrotor
+    vehicles: bool = True         # False: markers only (the world already has the vehicles, e.g. PX4 x500s)
     intents: bool = True
     truth: bool = True
     predictions: bool = True
@@ -73,10 +75,14 @@ def frame_markers(frame: Frame, opt: ViewOptions) -> list[dict]:
 
 
 class GzView:
-    def __init__(self, client, opt: ViewOptions = ViewOptions()):
-        self.gz, self.opt = client, opt
+    MARKER_RETRY_S = 30.0
+
+    def __init__(self, client, opt: ViewOptions = ViewOptions(), clock=time.monotonic):
+        self.gz, self.opt, self.clock = client, opt, clock
         self.models: dict[int, float] = {}            # vid -> last time seen
         self.marker_ids: dict[str, int] = {}          # ns -> how many ids were in use last frame
+        self.markers_off_until = -math.inf            # no GUI answering /marker_array: skip markers until then
+        self.markers_warned = False
 
     @staticmethod
     def names(vid: int) -> tuple[str, str]:
@@ -89,6 +95,11 @@ class GzView:
         self.gz.create(drone_marker_sdf(nc, NC_RGB, self.opt.scale), nc, park)
 
     def apply(self, frame: Frame):
+        if self.opt.vehicles:
+            self._vehicles(frame)
+        self._markers(frame_markers(frame, self.opt))
+
+    def _vehicles(self, frame: Frame):
         poses = []
         for vid, v in frame.vehicles.items():
             if vid not in self.models:
@@ -111,17 +122,28 @@ class GzView:
                 ok, nc = self.names(vid)
                 poses += [(ok, (0, 0, PARK_Z), (0, 0, 0, 1)), (nc, (0, 0, PARK_Z), (0, 0, 0, 1))]
         self.gz.set_poses(poses)
-        self._markers(frame_markers(frame, self.opt))
 
     def _markers(self, mk: list[dict]):
+        """Markers are drawn by the GUI. Without one, each request waits for its timeout, so after a failure they
+        are skipped for MARKER_RETRY_S (and the ids are forgotten: a GUI that appears later starts clean)."""
+        now = self.clock()
+        if now < self.markers_off_until:
+            return
         used: dict[str, int] = {}
         for m in mk:
             used[m["ns"]] = max(used.get(m["ns"], 0), m["id"] + 1)
         for ns, n_old in self.marker_ids.items():
             for i in range(used.get(ns, 0), n_old):
                 mk.append({"ns": ns, "id": i, "action": "delete"})
+        if self.gz.markers(mk) is False:
+            self.markers_off_until = now + self.MARKER_RETRY_S
+            self.marker_ids = {}
+            if not self.markers_warned:
+                print(f"gz view: no Gazebo GUI is drawing markers (/marker_array); intent boxes are skipped, "
+                      f"retrying every {self.MARKER_RETRY_S:.0f} s")
+                self.markers_warned = True
+            return
         self.marker_ids = used
-        self.gz.markers(mk)
 
     def clear(self):
         for vid in list(self.models):
