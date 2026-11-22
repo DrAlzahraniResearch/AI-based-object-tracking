@@ -119,8 +119,11 @@ docker compose -f docker/compose.yaml run --rm -e RUN_PX4GZ=1 px4gz python3 -m p
 
 Verified so far (Docker Desktop on Windows, CPU only): all three images build; `RUN_GZ=1` passes (Harmonic
 world started, vehicle models created and moved through the Python bindings); `RUN_PX4GZ=1` passes (one x500
-delivery spawned, flown under the twin and landed, about 5 minutes). Not yet tried: recorded video
-(`--record`), the GUI from a container, the live link, and runs with several x500s at once.
+delivery spawned, flown under the twin and landed, about 5 minutes); `--record --camera follow:0` of that run
+gives a correct 59 s, 1280x720 video (589 frames: take-off from the pad, climb over the town, cruise, return,
+landing; conforming throughout). CPU rendering takes a few seconds per frame, so a recording takes several times
+the flight's length; it prints progress every 25 frames. Not yet tried: the GUI from a container, the live link,
+and runs with several x500s at once.
 
 ## Limits
 
