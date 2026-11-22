@@ -591,3 +591,19 @@ def test_paced_plant_holds_sim_to_pace():
 def test_live_demo_script_parses():
     r = subprocess.run(["bash", "-n", str(ROOT / "scripts/live_demo.sh")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+def test_line_markers_are_redrawn_not_modified(run_dir):
+    """Gazebo appends points when a line marker is modified: each frame must delete a line before redrawing it."""
+    run, worlds = run_dir
+    sc = Scene.from_run(run, worlds)
+    rc = RecordingClient()
+    view = GzView(rc, ViewOptions())
+    view.apply(sc.frame(10.0))
+    first = [m for m in rc.calls[-1][1] if m["ns"] == "predicted_path"]
+    assert [m.get("action", "add") for m in first] == ["add"]          # nothing to delete the first time
+    view.apply(sc.frame(11.0))
+    again = [m for m in rc.calls[-1][1] if m["ns"] == "predicted_path"]
+    assert [m.get("action", "add") for m in again] == ["delete", "add"] and again[0]["id"] == again[1]["id"]
+    boxes = [m for m in rc.calls[-1][1] if m["ns"] == "intents"]
+    assert boxes and all(m.get("action", "add") == "add" for m in boxes)   # boxes are modified in place

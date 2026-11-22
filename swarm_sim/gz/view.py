@@ -22,6 +22,7 @@ from ..viz.scene import NC_RGB, OK_RGB, PRED_RGB, TRUTH_RGB, VEHICLE_PALETTE, Fr
 from .models import drone_marker_sdf, rpy_to_quat
 
 PARK_Z = -200.0
+LINE_TYPES = ("line_strip", "points")
 
 
 @dataclass
@@ -51,7 +52,7 @@ def frame_markers(frame: Frame, opt: ViewOptions) -> list[dict]:
                 continue
             rgb = VEHICLE_PALETTE[b.vid % len(VEHICLE_PALETTE)]
             out.append({"ns": "intents", "id": k, "type": "box", "pos": tuple(b.center), "size": tuple(b.size),
-                        "rgba": _rgba(rgb, 0.18 if b.certified else 0.08)})
+                        "rgba": _rgba(rgb, 0.10 if b.certified else 0.04)})   # faint: up to ~20 overlap
             k += 1
     if opt.truth:
         for k, (vid, p) in enumerate(sorted(frame.truth.items())):
@@ -135,6 +136,14 @@ class GzView:
         for ns, n_old in self.marker_ids.items():
             for i in range(used.get(ns, 0), n_old):
                 mk.append({"ns": ns, "id": i, "action": "delete"})
+        # Modifying a line marker in Gazebo appends its new points to the old ones (seen in the GUI as fans of
+        # lines through every past position), so lines are deleted and drawn again each frame.
+        out = []
+        for m in mk:
+            if m.get("type") in LINE_TYPES and self.marker_ids.get(m["ns"], 0) > m["id"]:
+                out.append({"ns": m["ns"], "id": m["id"], "action": "delete"})
+            out.append(m)
+        mk = out
         if self.gz.markers(mk) is False:
             self.markers_off_until = now + self.MARKER_RETRY_S
             self.marker_ids = {}

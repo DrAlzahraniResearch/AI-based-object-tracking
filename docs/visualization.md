@@ -141,7 +141,14 @@ at once, one from the east) flew their deliveries at real time with conformance 
 the twin calibrated a 4.07 s lift-off lag (3.9 s with SIH); `audit_twin.py` with the verified checker is
 CONSISTENT (3 certified concurrent pairs confirmed, 3,330 PX4 position samples all inside their boxes, no loss of
 separation). `scripts/live_demo.sh` (Tier A at 4x, headless): the viewer received all 935 messages of 474 s of
-traffic (up to 4 drones, 18 intent boxes in force) and drew 377 frames. Not yet tried: the GUI from a container.
+traffic (up to 4 drones, 18 intent boxes in force) and drew 377 frames. The same with `--gui` from the `gz-gui`
+service (PowerShell, WSLg paths set as in `docker/compose.yaml`): the Gazebo window opens on the Windows desktop
+with the town and the live overlays. That run showed two drawing faults, fixed since and not yet re-checked in the
+GUI: prediction lines grew into fans (Gazebo appends points when a line marker is modified; lines are now deleted
+and redrawn each frame) and overlapping intent boxes looked solid (opacity lowered to 10 % / 4 %).
+
+On Windows, set the GUI variables in PowerShell, not MSYS2/Git Bash: those shells rewrite `/run/...` values
+into Windows paths (`C:\Program Files\Git\run/...`) and Docker cannot mount them.
 
 ## Limits
 
