@@ -2,6 +2,7 @@
 
     python scripts/run_twin.py --world data/worlds/mini_town                     # Tier A plant (mismatch + fault)
     python scripts/run_twin.py --world data/worlds/mini_town --plant px4         # PX4 SITL (SIH) via MAVSDK
+    python scripts/run_twin.py --world data/worlds/mini_town --plant px4gz       # PX4 SITL x500s in Gazebo (px4gz image)
     python scripts/run_twin.py --world data/worlds/mini_town --plant replay --replay runs_twin/<run>/twin_log.mcap
 
 Writes runs_twin/<world>_<plant>_s<seed>_x<scale>/: twin_log.mcap, report.json, intents.json (every plan
@@ -33,7 +34,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--world", type=Path, required=True)
 ap.add_argument("--config", type=Path, default=ROOT / "configs/tier_a.yaml")
 ap.add_argument("--twin-config", type=Path, default=ROOT / "configs/twin.yaml")
-ap.add_argument("--plant", choices=["tier_a", "px4", "replay"], default="tier_a")
+ap.add_argument("--plant", choices=["tier_a", "px4", "px4gz", "replay"], default="tier_a")
 ap.add_argument("--replay", type=Path, help="twin_log.mcap to replay (--plant replay)")
 ap.add_argument("--seed", type=int)
 ap.add_argument("--rate-scale", type=float, default=1.0)
@@ -43,8 +44,11 @@ ap.add_argument("--no-calibrate", action="store_true")
 ap.add_argument("--no-faults", action="store_true", help="Tier A plant: no model mismatch, no fault (control run)")
 ap.add_argument("--admit-all", action="store_true",
                 help="no strategic deconfliction: every request flies as filed (benchmark for conflict prediction)")
-ap.add_argument("--missions", type=int, help="px4: number of vehicles/missions (overrides config)")
-ap.add_argument("--speed", type=float, help="px4: simulation speed factor (overrides config)")
+ap.add_argument("--missions", type=int, help="px4, px4gz: number of vehicles/missions (overrides config)")
+ap.add_argument("--speed", type=float, help="px4, px4gz: simulation speed factor (overrides config)")
+ap.add_argument("--gz-gui", action="store_true", help="px4gz: also open the Gazebo GUI")
+ap.add_argument("--gz-publish", action="store_true",
+                help="publish the twin live on the gz topic /swarm/twin (scripts/gz_view.py --live)")
 ap.add_argument("--verified", action="store_true", help="Lean-verified checker for conformance and scheduling")
 ap.add_argument("--hubs", choices=["off", "sequence", "reserve"],
                 help="hub sequencing; reserve: plus landing reservations at admission (overrides configs/twin.yaml hubs.mode)")
@@ -121,17 +125,25 @@ if args.plant == "tier_a":
         plant_name = "tier_a-nominal"
     plant = TierAPlant(air, requests, vp_cfg, sp, policy_factory(sp.dt), pp)
     max_t = sp.duration_s + sp.max_extra_s
-elif args.plant == "px4":
-    from swarm_sim.twin.px4 import Px4Plant
-    pc = tcfg.get("plant_px4") or {}
+elif args.plant in ("px4", "px4gz"):
+    pc = tcfg.get("plant_px4" if args.plant == "px4" else "plant_px4_gz") or {}
     k = args.missions or pc.get("missions", 1)
     picked = [m for m in requests if m.kind == "delivery"][:k]
     for i, m in enumerate(picked):
         m.id = i
-        m.release_t = 5.0 + i * pc.get("stagger_s", 20)
+        m.release_t = pc.get("first_release_s", 5.0) + i * pc.get("stagger_s", 20)
     requests = picked
-    plant = Px4Plant(len(requests), vp_cfg, sp, speed_factor=args.speed or pc.get("speed_factor", 1),
-                     rate_hz=pc.get("rate_hz", 10), setpoint_hz=pc.get("setpoint_hz", 20))
+    speed = args.speed or pc.get("speed_factor", 1)
+    if args.plant == "px4":
+        from swarm_sim.twin.px4 import Px4Plant
+        plant = Px4Plant(len(requests), vp_cfg, sp, speed_factor=speed,
+                         rate_hz=pc.get("rate_hz", 10), setpoint_hz=pc.get("setpoint_hz", 20))
+    else:
+        from swarm_sim.twin.px4_gz import Px4GzPlant
+        plant = Px4GzPlant(requests, air, vp_cfg, sp, speed_factor=speed, rate_hz=pc.get("rate_hz", 10),
+                           setpoint_hz=pc.get("setpoint_hz", 20), model=pc.get("model", "gz_x500"),
+                           spawn_lead_s=pc.get("spawn_lead_s", 45), pad_clear_m=pc.get("pad_clear_m", 4.0),
+                           gui=args.gz_gui)
     plant.t_end = max(m.release_t for m in requests) + 1.0
     max_t = 3600.0
 else:
@@ -158,11 +170,17 @@ print(f"twin: plant={plant_name} requests={len(requests)} checker={'verified' if
       f" -> {out}")
 twin = DigitalTwin(air, plant, requests, sched, vp, ip, sp, policy_factory, tp, checker, log, sequencer=sequencer,
                    vp_cfg=vp_cfg)
+if args.gz_publish:
+    from swarm_sim.gz.live import TOPIC, GzLiveTap
+    from swarm_sim.gz.transport import Gz
+    _gz = Gz(air.name)
+    log.taps.append(GzLiveTap(lambda data: _gz.publish_string(TOPIC, data), twin))
+    print(f"publishing the twin on gz topic {TOPIC} (scripts/gz_view.py --live --world {args.world})")
 try:
     rep = twin.run(max_t)
 finally:
     log.close()
-    if args.plant == "px4":
+    if args.plant in ("px4", "px4gz"):
         plant.close()
 
 rep |= {"world": air.name, "seed": seed, "rate_scale": args.rate_scale, "policy": args.policy, "log": log.file.name,
@@ -181,10 +199,11 @@ if isinstance(plant, TierAPlant):
     rep["prediction"]["los"] = score_los_predictions(twin.predictions, ev)
     np.savez_compressed(out / "truth.npz", times=res.times, tracks=res.tracks)
     (out / "events.json").write_text(json.dumps({"los": ev, "intrusions": res.intrusions, "status": res.status}))
-elif args.plant == "px4":
+elif args.plant in ("px4", "px4gz"):
     tr = np.array(plant.track) if plant.track else np.zeros((0, 5))
     np.savez_compressed(out / "truth.npz", px4_track=tr)
     rep["plant_truth"] = {"completed": sum(s == "landed" for s in plant.state), "speed_factor": plant.speed,
+                          "simulator": "gazebo" if args.plant == "px4gz" else "sih",
                           "note": "Tier B truth = PX4 EKF local position at telemetry rate"}
 else:
     rep["shadow_mode_commands_ignored"] = len(plant.ignored)

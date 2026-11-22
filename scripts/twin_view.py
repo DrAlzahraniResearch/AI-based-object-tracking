@@ -27,8 +27,7 @@ ap.add_argument("--every", type=float, default=1.0, help="seconds between frames
 args = ap.parse_args()
 
 import rerun as rr  # noqa: E402
-from shapely.geometry import Point, Polygon  # noqa: E402
-from shapely.ops import triangulate  # noqa: E402
+from swarm_sim.viz.scene import world_mesh  # noqa: E402
 
 rep = json.loads((args.run / "report.json").read_text())
 air = Airspace.load(args.world_dir / rep["world"] / "airspace.json")
@@ -42,26 +41,8 @@ out = args.run / "twin.rrd"
 rr.save(str(out))
 
 # ------------------------------------------------------------------ static world
-verts, tris = [], []
-for b in air.buildings:
-    poly = Polygon(b.polygon)
-    if not poly.is_valid or poly.area < 1:
-        continue
-    ring = list(poly.exterior.coords)[:-1]
-    base = len(verts)
-    for x, y in ring:
-        verts += [(x, y, 0.0), (x, y, b.height)]
-    n = len(ring)
-    for i in range(n):
-        j = (i + 1) % n
-        a0, a1, b0, b1 = base + 2 * i, base + 2 * i + 1, base + 2 * j, base + 2 * j + 1
-        tris += [(a0, b0, b1), (a0, b1, a1)]
-    for t in triangulate(poly):
-        if poly.contains(Point(t.centroid.x, t.centroid.y)):
-            k = len(verts)
-            verts += [(x, y, b.height) for x, y in list(t.exterior.coords)[:3]]
-            tris.append((k, k + 1, k + 2))
-rr.log("world/buildings", rr.Mesh3D(vertex_positions=np.array(verts), triangle_indices=np.array(tris),
+verts, tris = world_mesh(air)
+rr.log("world/buildings", rr.Mesh3D(vertex_positions=verts, triangle_indices=tris,
                                     albedo_factor=[170, 170, 180, 255]), static=True)
 for k, nf in enumerate(air.no_fly):
     ring = np.array(nf.polygon + [nf.polygon[0]], float)

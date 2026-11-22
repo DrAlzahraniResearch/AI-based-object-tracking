@@ -49,7 +49,8 @@ class Px4Plant(Plant):
 
     def __init__(self, n: int, vp: VehicleParams, sp: SimParams, speed_factor: float = 1.0,
                  rate_hz: float = 10.0, setpoint_hz: float = 20.0, workdir: str | os.PathLike = "/tmp/px4_twin",
-                 model: str = "sihsim_quadx", launch: bool = True, arm_lead_s: float = 4.0, log=print):
+                 model: str = "sihsim_quadx", launch: bool = True, arm_lead_s: float = 4.0, log=print,
+                 start: bool = True):
         self.n, self.vp, self.sp = n, vp, sp
         self.speed, self.rate_hz, self.sp_hz = speed_factor, rate_hz, setpoint_hz
         self.workdir, self.model, self.log = Path(workdir), model, log
@@ -66,7 +67,16 @@ class Px4Plant(Plant):
         self.ready = threading.Event()
         self.err: list = []
         self.track: list = []                          # (t, vid, x, y, z) at telemetry rate: the Tier B "truth"
-        if launch:
+        self.origin: dict[int, tuple] = {}             # ENU of each instance's local NED origin
+        self.last_pos: dict[int, np.ndarray] = {}
+        self.external_clock = False                    # True: t_plant comes from the simulator (Gazebo), not PX4
+        self.keep_streams = True                       # keep a landed vehicle's telemetry (SIH: instance 0 is the clock)
+        self.launch_flag = launch
+        if start:
+            self._start()
+
+    def _start(self):
+        if self.launch_flag:
             self._launch()
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -155,22 +165,23 @@ class Px4Plant(Plant):
             self.err.append(repr(e))
             self.ready.set()
 
-    async def _main(self):
+    async def _connect(self, k: int):
+        """MAVSDK link to instance k (offboard port 14540 + k), once it is healthy enough to arm."""
         from mavsdk import System
-        systems = []
-        for k in range(self.n):
-            d = System(port=50051 + k)
-            await d.connect(system_address=f"udpin://0.0.0.0:{14540 + k}")
-            systems.append(d)
-        for k, d in enumerate(systems):
-            async for s in d.core.connection_state():
-                if s.is_connected:
-                    break
-            async for h in d.telemetry.health():
-                if h.is_local_position_ok and h.is_home_position_ok and h.is_armable:
-                    break
-            await d.telemetry.set_rate_position_velocity_ned(self.rate_hz)
-            await d.telemetry.set_rate_odometry(self.rate_hz)
+        d = System(port=50051 + k)
+        await d.connect(system_address=f"udpin://0.0.0.0:{14540 + k}")
+        async for s in d.core.connection_state():
+            if s.is_connected:
+                break
+        async for h in d.telemetry.health():
+            if h.is_local_position_ok and h.is_home_position_ok and h.is_armable:
+                break
+        await d.telemetry.set_rate_position_velocity_ned(self.rate_hz)
+        await d.telemetry.set_rate_odometry(self.rate_hz)
+        return d
+
+    async def _main(self):
+        systems = [await self._connect(k) for k in range(self.n)]
         self.ready.set()
         self.log(f"PX4 plant: {self.n} instance(s) ready, speed x{self.speed:g}")
         await asyncio.gather(*(self._vehicle(k, d) for k, d in enumerate(systems)))
@@ -184,9 +195,9 @@ class Px4Plant(Plant):
                 ts = o.time_usec / 1e6
                 with self.lock:
                     if self.clock_off[k] is None:
-                        self.clock_off[k] = ts - (self.t_plant if k else 0.0)
+                        self.clock_off[k] = ts - (self.t_plant if (k or self.external_clock) else 0.0)
                     latest["t"] = ts - self.clock_off[k]
-                    if k == 0:
+                    if k == 0 and not self.external_clock:
                         self.t_plant = latest["t"]
 
         async def pvs():
@@ -205,7 +216,7 @@ class Px4Plant(Plant):
             with self.lock:
                 st, m = self.state[k], self.missions.get(k)
             if st == "cancelled":
-                await asyncio.gather(*tasks, return_exceptions=True)      # keep the clock running
+                await self._end_streams(tasks)                            # SIH: keep the clock running
                 return
             if st == "waiting" and m is not None and latest["t"] >= m.release_t - self.arm_lead:
                 break
@@ -219,13 +230,16 @@ class Px4Plant(Plant):
 
         def enu():
             pv = latest["pv"]
-            pad = self.pad[k]
+            pad = self.origin[k]
             return (np.array([pad[0] + pv.position.east_m, pad[1] + pv.position.north_m, pad[2] - pv.position.down_m]),
                     np.array([pv.velocity.east_m_s, pv.velocity.north_m_s, -pv.velocity.down_m_s]))
 
         with self.lock:
-            self.pad = getattr(self, "pad", {})
-            self.pad[k] = tuple(self.missions[k].meta.get("pad", self.missions[k].meta["start"]))
+            pad = tuple(self.missions[k].meta.get("pad", self.missions[k].meta["start"]))
+            o = self.origin.setdefault(k, pad)             # SIH: the instance is wherever its mission starts
+            if math.dist(o[:2], pad[:2]) > 1.0:
+                self.log(f"PX4 plant: vehicle {k} stands at {o[:2]}, its plan starts at {pad[:2]} "
+                         f"({math.dist(o[:2], pad[:2]):.1f} m): expect a conformance alert at take-off")
             self.state[k] = "flying"
             ver = self.route_ver[k]
             m = self.missions[k]
@@ -251,6 +265,7 @@ class Px4Plant(Plant):
                 last_tx = t
                 self.q.put(Telemetry(k, t, p, v, "flying", wi, hold_until, int(ver)))
                 self.track.append((t, k, *p))
+                self.last_pos[k] = p
             await asyncio.sleep(period)
         # final approach: PX4 LAND mode
         await d.offboard.stop()
@@ -262,10 +277,21 @@ class Px4Plant(Plant):
                 last_tx = t
                 self.q.put(Telemetry(k, t, p, v, "flying", len(m.waypoints) - 1, -1.0, int(ver)))
                 self.track.append((t, k, *p))
+                self.last_pos[k] = p
             await asyncio.sleep(period)
         p, v = enu()
         self.q.put(Telemetry(k, latest["t"], p, np.zeros(3), "landed", len(m.waypoints), -1.0, int(ver)))
         with self.lock:
             self.state[k] = "landed"
-        # keep the telemetry streams alive: instance 0's odometry is the plant clock for everyone
+            self.last_pos[k] = p
+        await self._end_streams(tasks)
+
+    async def _end_streams(self, tasks):
+        """SIH: keep the telemetry streams alive, instance 0's odometry is the plant clock for everyone.
+        Gazebo: the clock is the world's, so a finished vehicle's streams stop (and the instance is removed)."""
+        if self.keep_streams:
+            await asyncio.gather(*tasks, return_exceptions=True)
+            return
+        for task in tasks:
+            task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

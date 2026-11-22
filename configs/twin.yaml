@@ -27,6 +27,16 @@ plant_px4:                         # Tier B: PX4 SITL (SIH) through MAVSDK
   setpoint_hz: 20
   missions: 2                      # first N deliveries of the seed's demand, one PX4 instance each
   stagger_s: 20                    # re-timed releases: 5 s, 25 s, ...
+plant_px4_gz:                      # Tier B in Gazebo Harmonic: PX4 SITL x500s in the OSM world (swarm_sim/twin/px4_gz.py)
+  speed_factor: 1                  # Gazebo real-time factor; an x500 with sensors costs more CPU than SIH
+  rate_hz: 10
+  setpoint_hz: 20
+  missions: 3
+  first_release_s: 60              # time for the first vehicle to spawn, boot and get a GPS fix
+  stagger_s: 30
+  spawn_lead_s: 45                 # spawn each vehicle this long before its filed release
+  pad_clear_m: 4                   # ... once no other vehicle stands on (or hovers low over) its pad
+  model: gz_x500
 hubs:                              # milestone 5: hub sequencing (swarm_sim/hubs.py)
   mode: "off"                      # off | sequence (or --hubs)
   approach_fix_m: 100              # inbound flights end their cruise at a fix this far from the hub centre (sequence,

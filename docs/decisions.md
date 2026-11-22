@@ -220,3 +220,33 @@ result equals.
 slack on the rest of the plan) added 2-8 % throughput at x5 in a one-seed trial and was dropped. Admitting
 without a reservation when none exists within the ground-delay limit (`reserve_fallback`) is kept as an
 option, not the default: it recovers throughput but brings back flights that can go contingent.
+
+## Milestone 6: Gazebo and visualization
+
+**S45. Gazebo Harmonic on Ubuntu 24.04 for Tier B, not Jetty.** PX4 v1.16.2's `px4-rc.gzsim` requires gz-sim >= 8
+and its `Tools/setup/ubuntu.sh` installs gz-harmonic on 24.04; its gz bridge builds against gz-transport 13 or 14.
+So Tier B gets its own image (`gz`: 24.04 + Harmonic) and `px4gz` builds PX4 on top of it, copying only the Lean
+runtime (`libleanshared.so`) from `proofs` (also 24.04) so `--verified` still works. The 26.04 + Jetty `sim`
+image stays for the ROS stack shared with the MOT repo.
+
+**S46. One scene model, several viewers.** `swarm_sim/viz/scene.py` turns a twin run into frames (estimates with
+conformance, truth, predictions, intent boxes in force, events), fed from the finished log or live. Gazebo,
+Foxglove and Rerun draw those frames instead of each re-reading the log, so the viewers cannot disagree about
+which boxes were in force when. The viewer reads the log, never the simulator, and works for every plant
+(Tier A, PX4-SIH, PX4-Gazebo, replay) and every past run.
+
+**S47. Vehicles as models, overlays as markers, video by stepping.** Gazebo camera sensors render server
+entities, not GUI markers, so vehicles are spawned models (a green and a red one each, one parked below ground:
+no run-time material changes) and intent boxes are markers (GUI only). Video is made from a paused world stepped
+by one camera period per frame, so it is identical on a laptop's CPU renderer and a GPU.
+
+**S48. In Gazebo, vehicles come and go.** With SIH every instance boots at t = 0 and vehicles never meet. In
+Gazebo they share a world: a vehicle is spawned 45 s before its filed release at its filed pad once the pad is
+clear, and removed after landing (a returning delivery would otherwise block a pad for good). The plant clock
+becomes the world's sim time. A pad changed at admission after the spawn is not hidden: the vehicle takes off
+where it stands and the twin flags it.
+
+**S49. The live link is one-way.** `--gz-publish` puts the twin's log messages and plan versions on a gz topic
+for the viewer. Nothing comes back, so S22 (the twin never reads a simulator's internals) still holds with
+Gazebo in the loop.
+

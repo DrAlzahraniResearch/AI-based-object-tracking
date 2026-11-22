@@ -14,6 +14,7 @@ emergency, inspection), with machine-checked separation guarantees.
 | 7. Shared landing hubs | done (milestones 5, 5.5) | `swarm_sim/hubs.py`: approach fixes, certified landing slots with ring holding, arrival priority; landing reservations at admission, emergency priority; compact vs spread layouts; Theorem 4 |
 | 8. Stress tests | ready | `run_tier_a.py --rate-scale` |
 | 9. Centralized vs decentralized | not started | both will be `SeparationPolicy` + scheduler variants on the same runs |
+| Gazebo + visualization (milestone 6) | built, Gazebo runs not yet verified | PX4 x500s in the OSM world in Gazebo Harmonic (`--plant px4gz`), Gazebo viewer with headless video and a live link (`scripts/gz_view.py`), Foxglove export; `docs/visualization.md` |
 | Digital twin (milestone 4.5) | done | `swarm_sim/twin/`: telemetry → state → verified conformance → replan / calibrate / predict, against Tier A, PX4 SITL or a replayed log; Theorem 3 (`docs/twin.md`) |
 
 ## Quick start (Docker Desktop, from the repo root)
@@ -42,6 +43,17 @@ docker compose -f docker/compose.yaml run --rm px4 python3 scripts/run_twin.py -
   --plant px4 --missions 3 --speed 1 --verified --tag session1
 docker compose -f docker/compose.yaml run --rm px4 python3 scripts/fidelity_report.py runs_twin/mini_town_px4_s1_x1_session1
 pip install rerun-sdk && python scripts/twin_view.py runs_twin/<run> && rerun runs_twin/<run>/twin.rrd   # 3D, on Windows
+```
+
+Gazebo and visualization (milestone 6, `docs/visualization.md`):
+
+```bash
+docker compose -f docker/compose.yaml build proofs gz px4gz          # Ubuntu 24.04 + Gazebo Harmonic; PX4 with its gz bridge
+docker compose -f docker/compose.yaml run --rm px4gz python3 scripts/run_twin.py --world data/worlds/mini_town \
+  --plant px4gz --missions 3 --verified                              # PX4 x500s flying the OSM town in Gazebo
+docker compose -f docker/compose.yaml run --rm gz python3 scripts/gz_view.py runs_twin/<run> --launch \
+  --record runs_twin/<run>/gazebo.mp4                                # any twin run as a Gazebo video (headless)
+python scripts/foxglove_export.py runs_twin/<run>                    # 3D + event log + plots for Foxglove
 ```
 
 Hub sequencing (milestone 5):
@@ -142,16 +154,20 @@ Totals over three seeds per demand level (`scripts/compare_policies.py`; per-run
 
 ```
 swarm_sim/   osm, vehicle (Tier A fleet + VehicleAPI), missions, intents, sim, orca, scheduler, hubs, metrics, plot
-swarm_sim/twin/  telemetry (plants: Tier A, replay), px4 (PX4 SITL via MAVSDK), state (estimation, conformance,
-             calibration), core (the loop, prediction), log (MCAP), figures
+swarm_sim/twin/  telemetry (plants: Tier A, replay), px4 (PX4 SITL via MAVSDK), px4_gz (PX4 SITL in Gazebo),
+             state (estimation, conformance, calibration), core (the loop, prediction), log (MCAP), figures
+swarm_sim/viz/   scene (frames of a twin run, finished or live), foxglove (MCAP export), schemas (Foxglove's)
+swarm_sim/gz/    models, transport (bindings + CLI, clock), view (frames -> Gazebo), record (video), live, launch
 proofs/      Lean: UtmChecker.lean (executable Int checker) + UtmProofs/ (spec, theorems 1-3, refinement, registry: theorem 4)
 runtime/     C shim + header + Makefile → libutm_checker.{so,a}; ctypes binding utm_checker.py
 scripts/     osm_to_world, run_tier_a, audit_run, compare_policies, demo.sh;
              run_twin, audit_twin, fidelity_report, twin_view (Rerun), compare_twin, twin_demo.sh;
-             compare_hubs, hubs_demo.sh
+             compare_hubs, hubs_demo.sh; gz_view (Gazebo), foxglove_export
 configs/     tier_a.yaml, twin.yaml, hubs_mini_town.yaml
-docker/      eval, proofs, px4 (PX4 SITL + MAVSDK), sim (Gazebo Jetty) images + compose
-docs/        architecture, twin, proofs, osm, decisions, results_milestone4, results_milestone4_5, results_milestone5
+docker/      eval, proofs, px4 (PX4 SITL + MAVSDK), sim (Gazebo Jetty), gz (24.04 + Gazebo Harmonic),
+             px4gz (PX4 + Gazebo bridge) images + compose
+docs/        architecture, twin, visualization, proofs, osm, decisions, results_milestone4, results_milestone4_5,
+             results_milestone5, results_milestone5_5
 ```
 
 See `docs/architecture.md` for the two-tier design and milestones and `docs/proofs.md` for exactly

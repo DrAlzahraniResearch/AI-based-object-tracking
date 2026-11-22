@@ -4,6 +4,9 @@
 #   docker compose -f docker/compose.yaml run --rm proofs                   # Lean proofs + C library + FFI tests + audit
 #   docker compose -f docker/compose.yaml run --rm sim bash                 # ROS 2 Lyrical + Gazebo Jetty shell
 #   docker compose -f docker/compose.yaml run --rm px4                      # digital twin on PX4 SITL (Tier B)
+#   docker compose -f docker/compose.yaml run --rm gz bash                  # Ubuntu 24.04 + Gazebo Harmonic (viewer)
+#   docker compose -f docker/compose.yaml run --rm px4gz                    # digital twin on PX4 SITL in Gazebo
+#   docker compose -f docker/compose.yaml --profile gui run --rm gz-gui ... # Gazebo GUI on X11 / WSLg (see the service)
 #
 # eval and sim are the images already verified on the MOT repo (same bases, same install script).
 name: civilian-swarm
@@ -48,6 +51,50 @@ services:
 
   sim-gpu:
     extends: sim
+    profiles: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: all, capabilities: [gpu]}]
+
+  # Gazebo Harmonic on Ubuntu 24.04 (PX4 v1.16.2's supported pair): gz_view.py (replay, live, headless video).
+  gz:
+    <<: *src
+    build: {context: .., dockerfile: docker/gz.Dockerfile}
+    image: civilian-swarm/gz:latest
+    environment:
+      - GZ_PARTITION=swarm
+
+  # Tier B in Gazebo: PX4 SITL x500s in the OSM world. Build order: proofs, gz, then px4gz.
+  px4gz:
+    <<: *src
+    build: {context: .., dockerfile: docker/px4gz.Dockerfile}
+    image: civilian-swarm/px4gz:latest
+    environment:
+      - GZ_PARTITION=swarm
+
+  # The GUI from a container. Linux: `xhost +local:` first. Windows (Docker Desktop + WSL 2) uses WSLg's X server
+  # inside the Docker Desktop VM: set X11_DIR=/run/desktop/mnt/host/wslg/.X11-unix and
+  # WSLG_DIR=/run/desktop/mnt/host/wslg (and DISPLAY=:0) before `docker compose`. Software rendering is slow but works.
+  gz-gui:
+    extends: px4gz
+    profiles: [gui]
+    environment:
+      - DISPLAY=${DISPLAY:-:0}
+      - WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-}
+      - XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp}
+      - QT_X11_NO_MITSHM=1
+      - LIBGL_ALWAYS_SOFTWARE=1
+    volumes:
+      - ..:/work
+      - ${X11_DIR:-/tmp/.X11-unix}:/tmp/.X11-unix
+      - ${WSLG_DIR:-/tmp/no-wslg}:/mnt/wslg
+
+  gz-gpu:
+    extends: px4gz
     profiles: [gpu]
     environment:
       - NVIDIA_VISIBLE_DEVICES=all

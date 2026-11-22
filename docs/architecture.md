@@ -8,7 +8,7 @@
 | Control | velocity commands, first-order lag τ = 0.4 s, PX4 x500 limits | MAVSDK offboard velocity setpoints |
 | Speed | 30 min of traffic in 3–10 s of wall time (31–172 flights, one CPU core) | real time at best |
 | Purpose | algorithms, stress tests, statistics (plan steps 3–9) | validate Tier A results on real autopilot dynamics |
-| Base | Docker `eval` (python:3.13-slim) | Ubuntu 24.04 + Jetty (PX4's supported pair) |
+| Base | Docker `eval` (python:3.13-slim) | Ubuntu 24.04 + Gazebo Harmonic (PX4 v1.16.2's supported pair; images `gz`, `px4gz`) |
 
 Both implement `VehicleAPI` (`swarm_sim/vehicle.py`), so a separation policy or scheduler written for
 Tier A runs unchanged on Tier B. Tier A limits come from PX4 parameters: MPC_XY_VEL_MAX 12,
@@ -57,7 +57,11 @@ configs/tier_a.yaml + hubs ─► missions ─► routes (cruise layers, clearan
    Theorem 4 (registry protocol); see the hub section below.
 5.5. **Done:** landing reservations: the planned arrival certified at admission and kept when no better
    tactical slot exists, tactical plans from `now`, bounded emergency priority; `docs/results_milestone5_5.md`.
-6. Tier B at scale: PX4 SITL in Gazebo Jetty (sensors, rendering), larger fleets, Tier A scenario replays.
+6. **Built, Gazebo runs not yet verified:** Tier B in Gazebo, PX4 SITL x500s in the OSM world on Gazebo Harmonic
+   (`--plant px4gz`, Ubuntu 24.04 images `gz` and `px4gz`; Harmonic, not Jetty, because PX4 v1.16.2 requires it), with
+   vehicles spawned at their pads and removed after landing; one scene model of a twin run drawn by Gazebo
+   (`gz_view.py`: replay, live, headless video), Foxglove and Rerun (`docs/visualization.md`). Next: larger fleets,
+   Tier A scenario replays in Gazebo.
 7. Stress sweep ×1…×10 and centralized (global scheduler) vs decentralized (ORCA + local
    negotiation) comparison on identical seeds (steps 8–9).
 8. Optional: OpenUTM Flight Blender as the external USS, with the checker as a runtime monitor.

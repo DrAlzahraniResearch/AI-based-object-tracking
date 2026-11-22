@@ -15,6 +15,7 @@ class TwinLog:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.channels: dict[str, int] = {}
+        self.taps: list = []                      # callables(topic, t, msg): live consumers (swarm_sim/gz/live.py)
         try:
             from mcap.writer import CompressionType, Writer
             self.f = open(self.path.with_suffix(".mcap"), "wb")
@@ -34,6 +35,8 @@ class TwinLog:
         self.file = Path(self.f.name)
 
     def write(self, topic: str, t: float, msg: dict):
+        for tap in self.taps:
+            tap(topic, t, msg)
         ns = int(round(t * 1e9))
         if self.w is None:
             self.f.write(json.dumps({"topic": topic, "t": t, "msg": msg}) + "\n")
